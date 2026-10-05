@@ -10,6 +10,7 @@ import (
 )
 
 func TestAccountJSONMigrationAndPersistence(t *testing.T) {
+	t.Setenv("CLAUDE2API_AUTH_DIR", t.TempDir())
 	dsn := filepath.Join(t.TempDir(), "accounts.db")
 	open := func() *gorm.DB {
 		t.Helper()

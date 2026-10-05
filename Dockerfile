@@ -9,6 +9,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/claude2api ./cmd/server
 
 FROM alpine:3.24
 WORKDIR /app
+ENV CLAUDE2API_AUTH_DIR=/app/data/auth
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /out/claude2api .
 COPY config.example.yaml config.yaml

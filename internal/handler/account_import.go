@@ -113,18 +113,7 @@ func parseAccountImport(text string) ([]accountImport, error) {
 func exportAccountJSON(accounts []repository.Account) []json.RawMessage {
 	rows := make([]json.RawMessage, 0, len(accounts))
 	for _, account := range accounts {
-		if account.ImportJSON != "" && json.Valid([]byte(account.ImportJSON)) {
-			rows = append(rows, json.RawMessage(account.ImportJSON))
-			continue
-		}
-		// Accounts imported before JSON preservation still retain their credentials.
-		row, _ := json.Marshal(struct {
-			Email      string            `json:"email"`
-			OrgUUID    string            `json:"org_uuid"`
-			SessionKey string            `json:"sessionKey"`
-			Cookies    map[string]string `json:"cookies"`
-		}{account.Email, account.OrgUUID, account.Cookies["sessionKey"], account.Cookies})
-		rows = append(rows, row)
+		rows = append(rows, repository.AccountExportJSON(account))
 	}
 	return rows
 }

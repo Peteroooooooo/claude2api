@@ -354,7 +354,7 @@ function setProgress(id, completed, total, text = `${completed}/${total}`) {
 
 async function importAccounts() {
   const text = $("#import-keys").value;
-  if (!text.trim()) return showMsg("请输入 sessionKey", "err");
+  if (!text.trim()) return showMsg("请输入 sessionKey 或选择账号 JSON", "err");
   const btn = $("#btn-import-submit");
   btn.disabled = true;
   try {
@@ -376,6 +376,8 @@ async function importAccounts() {
       if (done) break;
     }
     $("#import-keys").value = "";
+    $("#import-file").value = "";
+    $("#import-file-name").textContent = "";
     $("#import-mask").classList.add("hidden");
     await loadAccounts();
     showMsg(`导入完成：成功 ${result.imported}，失败 ${result.failed}`, result.failed ? "err" : "ok");
@@ -384,6 +386,28 @@ async function importAccounts() {
   } finally {
     btn.disabled = false;
     btn.textContent = "开始导入";
+  }
+}
+
+async function exportAccounts() {
+  const btn = $("#btn-export");
+  btn.disabled = true;
+  try {
+    const res = await api("/api/accounts/export", "GET", null, true);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = res.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "claude2api-accounts.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showMsg("全部账号 JSON 已导出", "ok");
+  } catch (e) {
+    showMsg("导出失败: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -1019,6 +1043,20 @@ $("#btn-import").addEventListener("click", () => {
   $("#import-keys").focus();
 });
 $("#btn-import-submit").addEventListener("click", importAccounts);
+$("#btn-export").addEventListener("click", exportAccounts);
+$("#import-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    JSON.parse(text.replace(/^\uFEFF/, ""));
+    $("#import-keys").value = text;
+    $("#import-file-name").textContent = file.name;
+  } catch (err) {
+    e.target.value = "";
+    showMsg("JSON 文件读取失败: " + err.message, "err");
+  }
+});
 for (const id of ["#btn-import-cancel", "#import-close"]) {
   $(id).addEventListener("click", () =>
     $("#import-mask").classList.add("hidden"),

@@ -8,13 +8,14 @@ import (
 
 // Account 是一条账号记录。
 type Account struct {
-	ID        uint              `json:"-" gorm:"primaryKey"`
-	Email     string            `json:"email" gorm:"uniqueIndex;not null"`
-	OrgUUID   string            `json:"org_uuid" gorm:"column:org_uuid"`
-	Cookies   map[string]string `json:"-" gorm:"serializer:json"`
-	Status    string            `json:"status,omitempty"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
+	ID         uint              `json:"-" gorm:"primaryKey"`
+	Email      string            `json:"email" gorm:"uniqueIndex;not null"`
+	OrgUUID    string            `json:"org_uuid" gorm:"column:org_uuid"`
+	Cookies    map[string]string `json:"-" gorm:"serializer:json"`
+	ImportJSON string            `json:"-" gorm:"type:text"`
+	Status     string            `json:"status,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
 }
 
 // LoadAccounts 读取全部账号。

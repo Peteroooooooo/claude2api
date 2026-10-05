@@ -38,6 +38,10 @@ func InitDB() error {
 		return fmt.Errorf("建表失败: %w", err)
 	}
 	db = conn
+	if err := SyncAuthFiles(); err != nil {
+		_ = CloseDB()
+		return fmt.Errorf("同步账号 auth 文件失败: %w", err)
+	}
 	return nil
 }
 

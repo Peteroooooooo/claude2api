@@ -1,6 +1,7 @@
 .git
 .idea
 data
+auth
 config.yaml
 sessionKey.txt
 *.exe

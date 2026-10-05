@@ -116,6 +116,17 @@ func DataDir() string {
 	return filepath.Join(baseDir, "data")
 }
 
+// AuthDir stores one portable credential JSON file per account.
+func AuthDir() string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE2API_AUTH_DIR")); dir != "" {
+		if filepath.IsAbs(dir) {
+			return dir
+		}
+		return filepath.Join(baseDir, dir)
+	}
+	return filepath.Join(baseDir, "auth")
+}
+
 // DBPath 返回数据库路径。
 func DBPath() string {
 	return filepath.Join(DataDir(), "app.db")

@@ -109,6 +109,7 @@
             <button id="btn-refresh" class="btn">刷新</button>
             <button id="btn-refresh-all" class="btn">一键刷新</button>
             <button id="btn-import" class="btn">批量导入</button>
+            <button id="btn-export" class="btn" title="下载全部账号 JSON，包含登录凭据">导出全部</button>
             <button id="btn-del-expired" class="btn">删除失效</button>
           </div>
           <div id="refresh-all-progress" class="task-progress hidden">
@@ -610,11 +611,14 @@
     <div id="import-mask" class="modal-mask hidden">
       <div class="modal modal-lg">
         <div class="modal-head">
-          <div class="modal-title">批量导入 sessionKey</div>
+          <div class="modal-title">批量导入账号</div>
           <button id="import-close" class="btn-link modal-x" aria-label="关闭导入窗口">×</button>
         </div>
         <div class="modal-body detail-body">
-          <p class="block-desc">每行一个 sessionKey，导入时会自动查询邮箱和组织 UUID。</p>
+          <p class="block-desc">每行一个 sessionKey，或选择 / 粘贴账号 JSON。JSON 中的原始字段会完整保存，可通过「导出全部」再次下载。</p>
+          <label class="btn" for="import-file">选择 JSON 文件</label>
+          <input id="import-file" type="file" accept=".json,application/json" class="hidden" />
+          <p id="import-file-name" class="block-desc"></p>
           <div id="import-progress" class="task-progress hidden">
             <div><span>正在导入账号</span><span class="task-progress-text"></span></div>
             <progress value="0" max="1"></progress>
@@ -623,7 +627,7 @@
             id="import-keys"
             class="inp"
             rows="8"
-            placeholder="每行粘贴一个 sessionKey"
+            placeholder="每行粘贴一个 sessionKey，或粘贴包含 sessionKey 的账号 JSON"
           ></textarea>
           <div class="modal-actions">
             <button id="btn-import-cancel" class="btn">取消</button>

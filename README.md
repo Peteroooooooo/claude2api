@@ -77,7 +77,9 @@ sk-ant-sid01-xxxxxxxx
 sk-ant-sid01-yyyyyyyy
 ```
 
-导入任务会在后台执行，并自动查询账号信息。`sessionKey` 等同于账号登录凭据，请妥善保管。
+导入任务会在后台执行，并自动查询账号信息。也可以在导入窗口选择或粘贴 JSON，支持账号数组、单个账号对象或含 `accounts` 数组的对象，凭据字段支持 `sessionKey`、`session_key` 或 `cookies.sessionKey`。JSON 账号对象的全部原始字段会保存。
+
+账号管理页的「导出全部」会下载所有账号的 JSON，包含登录凭据，可再次导入。旧账号导出数据库中已有的邮箱、组织 UUID、sessionKey 和 cookies；新 JSON 导入的账号导出保存的原始对象。`sessionKey` 等同于账号登录凭据，请妥善保管导出文件。
 
 ### 支持的模型
 

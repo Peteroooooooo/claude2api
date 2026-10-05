@@ -30,7 +30,11 @@ func AdminImportAccounts(c *gin.Context) {
 		return
 	}
 
-	items := parseImportSessionKeys(body.SessionKeys)
+	items, err := parseAccountImport(body.SessionKeys)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if len(items) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "没有可导入的 sessionKey"})
 		return
@@ -58,21 +62,9 @@ func AdminImportAccounts(c *gin.Context) {
 	slog.Info("[导入] 批量导入完成", "total", len(items), "imported", imported, "failed", failed)
 }
 
-func parseImportSessionKeys(text string) []string {
-	seen := map[string]bool{}
-	items := []string{}
-	for _, key := range strings.Fields(text) {
-		if !seen[key] {
-			seen[key] = true
-			items = append(items, key)
-		}
-	}
-	return items
-}
-
 type importResult struct{ email, err string }
 
-func importAccounts(items []string) <-chan importResult {
+func importAccounts(items []accountImport) <-chan importResult {
 	results := make(chan importResult, len(items))
 	go func() {
 		defer close(results)
@@ -80,11 +72,11 @@ func importAccounts(items []string) <-chan importResult {
 		// ponytail: 固定 10 并发，上游限流变化时再改为配置项。
 		sem := make(chan struct{}, 10)
 		slog.Info("[导入] 批量导入开始", "total", len(items))
-		for _, key := range items {
+		for _, item := range items {
 			wg.Go(func() {
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				client := service.NewClaudeAI(key, config.Get().Proxy, key)
+				client := service.NewClaudeAI(item.SessionKey, config.Get().Proxy, item.SessionKey)
 				info, err := client.GetUserInfo()
 				if err != nil || info == nil || info.Email == "" {
 					slog.Warn("[导入] 查询账号信息失败", "err", err)
@@ -95,7 +87,22 @@ func importAccounts(items []string) <-chan importResult {
 					results <- importResult{err: message}
 					return
 				}
-				if err := repository.UpsertAccount(&repository.Account{Email: info.Email, OrgUUID: info.OrgUUID, Cookies: map[string]string{"sessionKey": key}, Status: "active"}); err != nil {
+				account := repository.AccountByEmail(info.Email)
+				if account == nil {
+					account = &repository.Account{Email: info.Email}
+				}
+				account.OrgUUID, account.Status = info.OrgUUID, "active"
+				if account.Cookies == nil {
+					account.Cookies = map[string]string{}
+				}
+				for name, value := range item.Cookies {
+					account.Cookies[name] = value
+				}
+				account.Cookies["sessionKey"] = item.SessionKey
+				if item.JSON != "" {
+					account.ImportJSON = item.JSON
+				}
+				if err := repository.UpsertAccount(account); err != nil {
 					slog.Warn("[导入] 保存账号失败", "email", info.Email, "err", err)
 					results <- importResult{email: info.Email, err: "保存账号失败"}
 					return

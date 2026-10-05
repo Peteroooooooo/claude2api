@@ -25,6 +25,10 @@ type Settings struct {
 	MaxChatHistoryLength       int    `json:"max_chat_history_length" yaml:"max_history_length"`
 	RemoveInvalidAccount       bool   `json:"remove_invalid_account" yaml:"remove_invalid_account"`
 	DetailedAPILog             bool   `json:"detailed_api_log" yaml:"detailed_api_log"`
+	SessionReuse               bool   `json:"session_reuse" yaml:"session_reuse"`
+	SessionIdleSeconds         int    `json:"session_idle_seconds" yaml:"session_idle_seconds"`
+	QuotaCooldownSeconds       int    `json:"quota_cooldown_seconds" yaml:"quota_cooldown_seconds"`
+	RateLimitWaitSeconds       int    `json:"rate_limit_wait_seconds" yaml:"rate_limit_wait_seconds"`
 }
 
 var (
@@ -54,6 +58,8 @@ func Load() {
 	configPath = filepath.Join(baseDir, "config.yaml")
 	ensureConfig(configPath)
 	current = Settings{WebHost: "127.0.0.1", WebPort: 8787, WebUCHost: "localhost", StatusCheckIntervalSeconds: 21600, ChatDelete: true, MaxChatHistoryLength: 12000}
+	current.SessionReuse, current.SessionIdleSeconds = true, 86400
+	current.QuotaCooldownSeconds, current.RateLimitWaitSeconds = 1800, 10
 	data, _ := os.ReadFile(configPath)
 	_ = yaml.Unmarshal(data, &current)
 	current.Proxy = strings.TrimSpace(current.Proxy)
@@ -72,6 +78,13 @@ func Load() {
 	if current.MaxChatHistoryLength <= 0 {
 		current.MaxChatHistoryLength = 12000
 	}
+	if current.SessionIdleSeconds < 60 {
+		current.SessionIdleSeconds = 86400
+	}
+	if current.QuotaCooldownSeconds < 1 {
+		current.QuotaCooldownSeconds = 1800
+	}
+	current.RateLimitWaitSeconds = max(0, min(current.RateLimitWaitSeconds, 30))
 }
 
 func Get() Settings {
@@ -134,6 +147,14 @@ func Update(patch map[string]any) Settings {
 			current.RemoveInvalidAccount = mustBool(v)
 		case "detailed_api_log":
 			current.DetailedAPILog = mustBool(v)
+		case "session_reuse":
+			current.SessionReuse = mustBool(v)
+		case "session_idle_seconds":
+			current.SessionIdleSeconds = max(60, mustAtoi(v))
+		case "quota_cooldown_seconds":
+			current.QuotaCooldownSeconds = max(1, mustAtoi(v))
+		case "rate_limit_wait_seconds":
+			current.RateLimitWaitSeconds = max(0, min(30, mustAtoi(v)))
 		}
 	}
 	writeConfig()

@@ -92,10 +92,11 @@ func (claudeAI *ClaudeAI) WarmUp() error {
 		return err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("网页会话初始化 HTTP %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return webResponseError(resp.StatusCode, body, resp.Header.Get("retry-after"))
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
@@ -117,7 +118,7 @@ func (claudeAI *ClaudeAI) GetUserInfo() (*UserInfo, error) {
 	}
 	slog.Debug("[ClaudeAI] GetUserInfo 响应", "status", resp.StatusCode, "body", utils.Truncate(string(body), 500))
 	if resp.StatusCode != fhttp.StatusOK {
-		return nil, fmt.Errorf("查询账号信息 HTTP %d: %s", resp.StatusCode, utils.Truncate(string(body), 200))
+		return nil, webResponseError(resp.StatusCode, body, resp.Header.Get("retry-after"))
 	}
 
 	var acct ClaudeAccount
@@ -184,9 +185,9 @@ func (claudeAI *ClaudeAI) UploadFile(images []string) ([]string, error) {
 }
 
 // DeleteConversation 删除会话。
-func (claudeAI *ClaudeAI) DeleteConversation(convID string) {
+func (claudeAI *ClaudeAI) DeleteConversation(convID string) error {
 	if claudeAI.orgUUID == "" || convID == "" {
-		return
+		return errors.New("删除会话缺少组织或会话 ID")
 	}
 	target := fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s", claudeAIBaseURL, claudeAI.orgUUID, convID)
 	for i := 0; i < 3; i++ {
@@ -201,9 +202,9 @@ func (claudeAI *ClaudeAI) DeleteConversation(convID string) {
 			if doErr == nil {
 				_, _ = io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
-				if resp.StatusCode == fhttp.StatusOK || resp.StatusCode == fhttp.StatusNoContent {
+				if resp.StatusCode == fhttp.StatusOK || resp.StatusCode == fhttp.StatusNoContent || resp.StatusCode == fhttp.StatusNotFound {
 					cancel()
-					return
+					return nil
 				}
 			}
 		}
@@ -211,6 +212,7 @@ func (claudeAI *ClaudeAI) DeleteConversation(convID string) {
 		time.Sleep(2 * time.Second)
 	}
 	slog.Warn("[ClaudeAI] 删除会话失败", "conv", convID)
+	return errors.New("删除网页会话失败")
 }
 
 // BigContextAttachment 构造长上下文附件。
@@ -250,15 +252,16 @@ func (claudeAI *ClaudeAI) updatePaprika(value any) error {
 		return fmt.Errorf("更新设置失败: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != fhttp.StatusOK && resp.StatusCode != fhttp.StatusAccepted {
-		return fmt.Errorf("更新设置 HTTP %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return webResponseError(resp.StatusCode, body, resp.Header.Get("retry-after"))
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
-// CreateConversation 新建会话。
-func (claudeAI *ClaudeAI) CreateConversation(model string, think bool) (string, error) {
+// SetThinking restores the mode before both new and continued web turns.
+func (claudeAI *ClaudeAI) SetThinking(think bool) error {
 	claudeAI.modeMu.Lock()
 	if !claudeAI.modeSet || claudeAI.thinking != think {
 		var mode any
@@ -267,17 +270,25 @@ func (claudeAI *ClaudeAI) CreateConversation(model string, think bool) (string, 
 		}
 		if err := claudeAI.updatePaprika(mode); err != nil {
 			claudeAI.modeMu.Unlock()
-			return "", err
+			return err
 		}
 		claudeAI.modeSet, claudeAI.thinking = true, think
 	}
 	claudeAI.modeMu.Unlock()
+	return nil
+}
+
+func (claudeAI *ClaudeAI) CreateConversation(model string, think bool) (string, error) {
+	if err := claudeAI.SetThinking(think); err != nil {
+		return "", err
+	}
 
 	reqBody, err := json.Marshal(map[string]any{
 		"uuid":                             uuid.NewString(),
 		"name":                             "",
 		"include_conversation_preferences": true,
 		"model":                            model,
+		"is_temporary":                     false,
 	})
 	if err != nil {
 		return "", fmt.Errorf("构造请求体失败: %w", err)
@@ -301,7 +312,7 @@ func (claudeAI *ClaudeAI) CreateConversation(model string, think bool) (string, 
 		return "", fmt.Errorf("读取响应体失败: %w", err)
 	}
 	if resp.StatusCode != fhttp.StatusOK && resp.StatusCode != fhttp.StatusCreated {
-		return "", fmt.Errorf("创建会话 HTTP %d: %s", resp.StatusCode, utils.Truncate(string(body), 200))
+		return "", webResponseError(resp.StatusCode, body, resp.Header.Get("retry-after"))
 	}
 
 	var out struct {
@@ -318,6 +329,10 @@ func (claudeAI *ClaudeAI) CreateConversation(model string, think bool) (string, 
 
 // SendMessage 发送提示词。
 func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attachments []map[string]any, files []string, onText func(string)) (int, error) {
+	parent := prompt.ParentUUID
+	if parent == "" {
+		parent = rootMessageUUID
+	}
 	// 固定字段对齐网页端请求。
 	body := map[string]any{
 		"prompt": prompt.Text,
@@ -339,22 +354,22 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 			{"type": "artifacts_v0", "name": "artifacts"},
 			{"type": "repl_v0", "name": "repl"},
 		},
-		"parent_message_uuid": "00000000-0000-4000-8000-000000000000",
+		"parent_message_uuid": parent,
 		"attachments":         []any{},
 		"files":               []any{},
 		"sync_sources":        []any{},
 		"rendering_mode":      "messages",
 		"timezone":            "America/Los_Angeles",
 	}
-	// Claude.ai 网页端 completion 接口不接受 max_tokens 字段，
-	// 即使 API 兼容层收到该参数也不能转发，否则上游会返回
-	// "max_tokens: Extra inputs are not permitted"。
-	if prompt.Temperature != nil {
-		body["temperature"] = *prompt.Temperature
+	_, mode := resolveReasoning(model, prompt)
+	body["thinking_mode"] = mode
+	if prompt.Effort != "" {
+		body["effort"] = prompt.Effort
 	}
-	if prompt.TopP != nil {
-		body["top_p"] = *prompt.TopP
-	}
+	// Claude.ai 网页端 completion 接口不接受 max_tokens、temperature、top_p 等字段，
+	// 即使 API 兼容层收到也不能转发，否则上游会返回 Extra inputs are not permitted。
+	_ = prompt.Temperature
+	_ = prompt.TopP
 	if len(prompt.Stop) > 0 {
 		body["stop_sequences"] = prompt.Stop
 	}
@@ -386,26 +401,34 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == fhttp.StatusTooManyRequests {
-		body, _ := io.ReadAll(resp.Body)
-		return 429, fmt.Errorf("rate limit exceeded: %s", utils.Truncate(string(body), 300))
-	}
 	if resp.StatusCode != fhttp.StatusOK {
 		body, readErr := io.ReadAll(resp.Body)
-		bodyText := utils.Truncate(string(body), 500)
 		if readErr != nil {
 			return resp.StatusCode, fmt.Errorf("发送消息 HTTP %d（读取错误响应失败: %w）", resp.StatusCode, readErr)
 		}
-		if bodyText == "" {
-			bodyText = "<empty response body>"
+		if len(body) == 0 {
+			body = []byte("<empty response body>")
 		}
-		return resp.StatusCode, fmt.Errorf("发送消息 HTTP %d: %s", resp.StatusCode, bodyText)
+		return resp.StatusCode, webResponseError(resp.StatusCode, body, resp.Header.Get("retry-after"))
 	}
-	return 200, parseCompletionSSE(resp.Body, onText)
+	return 200, parseCompletionSSEWithThinking(resp.Body, onText, mode != "off" && prompt.ThinkingDisplay != "omitted", func(ev SseEvent) error {
+		if ev.Type == "message_start" && ev.Message.UUID != "" && prompt.OnMessageID != nil {
+			prompt.OnMessageID(ev.Message.UUID)
+		}
+		if ev.Type == "error" {
+			data, _ := json.Marshal(ev)
+			return webResponseError(200, data, "")
+		}
+		return nil
+	})
 }
 
 // parseCompletionSSE 解析 completion 流。
-func parseCompletionSSE(raw io.Reader, onText func(string)) error {
+func parseCompletionSSE(raw io.Reader, onText func(string), observers ...func(SseEvent) error) error {
+	return parseCompletionSSEWithThinking(raw, onText, true, observers...)
+}
+
+func parseCompletionSSEWithThinking(raw io.Reader, onText func(string), showThinking bool, observers ...func(SseEvent) error) error {
 	scanner := bufio.NewScanner(raw)
 	scanner.Buffer(make([]byte, 1024*1024), 4*1024*1024)
 
@@ -415,24 +438,59 @@ func parseCompletionSSE(raw io.Reader, onText func(string)) error {
 	useToolEnd := false
 	nextLanguage := false
 	language := "md"
+	hasOutput := false
+	messageStopped := false
+	stopReason := ""
 
 	emit := func(s string) {
-		if s != "" && onText != nil {
-			onText(s)
+		if s != "" {
+			hasOutput = true
+			if onText != nil {
+				onText(s)
+			}
 		}
 	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
 		var ev SseEvent
-		if err := json.Unmarshal([]byte(line[6:]), &ev); err != nil {
+		if err := json.Unmarshal([]byte(strings.TrimSpace(line[5:])), &ev); err != nil {
 			continue
 		}
-		if ev.Type == "error" && ev.Error.Message != "" {
-			return fmt.Errorf("upstream: %s", ev.Error.Message)
+		for _, observe := range observers {
+			if err := observe(ev); err != nil {
+				return err
+			}
+		}
+		if ev.Type == "error" {
+			message := ev.Error.Message
+			if message == "" {
+				message = ev.Error.Type
+			}
+			if message == "" {
+				message = "unknown stream error"
+			}
+			return fmt.Errorf("upstream: %s", message)
+		}
+		if ev.Type == "message_delta" && ev.Delta.StopReason != "" {
+			stopReason = ev.Delta.StopReason
+			if stopReason == "refusal" {
+				message := "upstream refused the request"
+				if ev.Delta.StopDetails.Category != "" {
+					message += " (" + ev.Delta.StopDetails.Category + ")"
+				}
+				if ev.Delta.StopDetails.Explanation != "" {
+					message += ": " + ev.Delta.StopDetails.Explanation
+				}
+				return errors.New(message)
+			}
+		}
+		if ev.Type == "message_stop" {
+			messageStopped = true
+			continue
 		}
 		switch ev.ContentBlock.Type {
 		case "tool_use":
@@ -456,8 +514,20 @@ func parseCompletionSSE(raw io.Reader, onText func(string)) error {
 		switch ev.Delta.Type {
 		case "text_delta":
 			emit(ev.Delta.Text)
-		case "thinking_delta":
+		case "thinking_delta", "thinking_summary_delta":
+			if !showThinking {
+				continue
+			}
 			s := ev.Delta.Thinking
+			if ev.Delta.Type == "thinking_summary_delta" {
+				s = ev.Delta.Summary.Summary
+				if thinkingShown && s != "" {
+					s = "\n\n" + s
+				}
+			}
+			if s == "" {
+				continue
+			}
 			if !thinkingShown {
 				s = "<think> " + s
 				thinkingShown = true
@@ -509,5 +579,14 @@ func parseCompletionSSE(raw io.Reader, onText func(string)) error {
 			emit(text)
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if !messageStopped {
+		return errors.New("upstream stream ended before message_stop")
+	}
+	if !hasOutput {
+		return fmt.Errorf("upstream returned an empty completion (stop_reason=%s)", stopReason)
+	}
+	return nil
 }

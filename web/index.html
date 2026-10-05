@@ -393,6 +393,16 @@
             <div class="stats" id="logs-stats"></div>
           </header>
 
+          <div class="log-overview">
+            <div class="log-overview-head">
+              <h3>用量概览</h3>
+              <span>全部保留日志 · Token 为请求 / 响应估算值</span>
+            </div>
+            <div class="log-summary" id="logs-summary" aria-label="调用与 Token 统计" aria-live="polite">
+              <div class="log-summary-loading">正在读取统计…</div>
+            </div>
+          </div>
+
           <div class="toolbar">
             <button id="btn-logs-refresh" class="btn">刷新</button>
             <button id="btn-logs-delete" class="btn" disabled>删除选中</button>
@@ -411,6 +421,7 @@
                   <th><input id="logs-check-all" type="checkbox" aria-label="全选本页" /></th>
                   <th>时间</th>
                   <th>请求</th>
+                  <th>推理</th>
                   <th>账号</th>
                   <th>状态</th>
                   <th>Token</th>
@@ -420,7 +431,7 @@
               </thead>
               <tbody id="logs-body">
                 <tr>
-                  <td colspan="8" class="empty">加载中…</td>
+                  <td colspan="9" class="empty">加载中…</td>
                 </tr>
               </tbody>
             </table>
@@ -489,11 +500,25 @@
                   />
                 </label>
                 <label class="field"
-                  >用完自动删会话
+                  >自动清理闲置会话
                   <select id="cfg-chat_delete" class="inp sel">
                     <option value="true">是</option>
                     <option value="false">否</option>
                   </select>
+                </label>
+                <label class="field">网页会话续聊
+                  <select id="cfg-session_reuse" class="inp sel">
+                    <option value="true">开启</option><option value="false">关闭</option>
+                  </select>
+                </label>
+                <label class="field">会话闲置时间（秒）
+                  <input id="cfg-session_idle_seconds" type="number" min="60" class="inp" placeholder="86400（24 小时）" />
+                </label>
+                <label class="field">额度耗尽默认冷却（秒）
+                  <input id="cfg-quota_cooldown_seconds" type="number" min="1" class="inp" placeholder="1800（30 分钟）" />
+                </label>
+                <label class="field">短期限速最多等待（秒）
+                  <input id="cfg-rate_limit_wait_seconds" type="number" min="0" max="30" class="inp" placeholder="10" />
                 </label>
               </div>
             </div>

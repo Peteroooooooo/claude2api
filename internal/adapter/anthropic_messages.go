@@ -66,7 +66,12 @@ func AnthropicMessages(c *gin.Context) {
 	prompt.ForceInline = true
 	prompt.Text += "\n\nContinue the conversation above with only the assistant's next response."
 	prompt.RawRequest = raw
+	if err := configureReasoning(raw, &prompt); err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	prompt.MaxTokens, prompt.Temperature, prompt.TopP, prompt.Stop = req.MaxTokens, req.Temperature, req.TopP, req.StopSequences
+	configureSession(c, &prompt, "messages", len(tools) > 0)
 	if len(tools) > 0 {
 		if req.Stream {
 			anthropicToolStream(c, model, prompt)
@@ -101,6 +106,7 @@ func normalizeAnthropicMessages(msgs []anthropicMessage) ([]Message, []string) {
 		}
 
 		var textParts []string
+		var messageImages []string
 		var toolCalls []ToolCall
 		var toolResults []Message
 		for _, b := range blocks {
@@ -122,6 +128,7 @@ func normalizeAnthropicMessages(msgs []anthropicMessage) ([]Message, []string) {
 					}
 					if source = normalizeImageSource(source, media); source != "" {
 						images = append(images, source)
+						messageImages = append(messageImages, source)
 					}
 				}
 			case "tool_use":
@@ -149,8 +156,8 @@ func normalizeAnthropicMessages(msgs []anthropicMessage) ([]Message, []string) {
 			out = append(out, Message{Role: "assistant", Content: text, ToolCalls: toolCalls})
 		} else if m.Role == "user" {
 			// user：先追加文本（若有），再追加 tool 结果。
-			if text != "" {
-				out = append(out, Message{Role: "user", Content: text})
+			if text != "" || len(messageImages) > 0 {
+				out = append(out, Message{Role: "user", Content: text, Images: messageImages})
 			}
 			out = append(out, toolResults...)
 		} else if text != "" {
@@ -265,18 +272,16 @@ func anthropicToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 	parsed := ParseTaggedOutputTolerant(raw)
 
 	content := make([]gin.H, 0, 2)
-	// <think> 是我们注入的伪协议脚手架，真实 Anthropic thinking 块需要 signature，
-	// 直接当 thinking 输出会被 Claude Code 拒绝（Content block is not a text block），
-	// 因此统一渲染为普通 text 块。
+	// 网页思考摘要没有 Anthropic API 的 signature，统一渲染为普通 text 块。
 	if parsed.Thinking != "" {
 		content = append(content, gin.H{"type": "text", "text": parsed.Thinking})
 	}
 	stop := "end_turn"
 	if parsed.IsToolCall() {
-		for _, tc := range parsed.ToolCalls {
+		for i, tc := range parsed.ToolCalls {
 			content = append(content, gin.H{
 				"type":  "tool_use",
-				"id":    newAnthropicToolID(),
+				"id":    stableToolID(prompt, i, true),
 				"name":  tc.Name,
 				"input": tc.Arguments,
 			})
@@ -306,12 +311,12 @@ func anthropicToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream := newMessageStream(c, model, prompt)
 	stopReason := "end_turn"
+	toolIndex := 0
 
 	raw, err := runTaggedStream("messages", model, prompt, func(ev TaggedStreamEvent) {
 		switch ev.Type {
 		case EventBlockStart:
-			// thinking 与 text 一律输出为 Anthropic text 块：伪协议的 <think>
-			// 没有 signature，若作为 thinking 块会被 Claude Code 拒绝。
+			// 网页思考摘要没有 API signature，输出为 text 块。
 			stream.open(gin.H{"type": "text", "text": ""})
 		case EventBlockDelta:
 			if ev.Text == "" {
@@ -323,10 +328,11 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 		case EventToolCall:
 			stopReason = "tool_use"
 			stream.open(gin.H{
-				"type": "tool_use", "id": newAnthropicToolID(), "name": ev.Name, "input": gin.H{},
+				"type": "tool_use", "id": stableToolID(prompt, toolIndex, true), "name": ev.Name, "input": gin.H{},
 			})
 			stream.delta(gin.H{"type": "input_json_delta", "partial_json": argsJSON(ev.Arguments)})
 			stream.close()
+			toolIndex++
 		}
 	})
 	if err != nil {

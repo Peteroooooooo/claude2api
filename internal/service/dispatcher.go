@@ -30,7 +30,7 @@ func clientFor(acct *repository.Account, proxy string) *accountClient {
 	defer apiIndexLock.Unlock()
 	client := apiClients[acct.Email]
 	if client == nil || client.sessionKey != key || client.proxy != proxy {
-		client = &accountClient{ClaudeAI: NewClaudeAI(key, proxy, acct.Email, acct.OrgUUID), sessionKey: key, proxy: proxy}
+		client = &accountClient{ClaudeAI: newAPIClient(key, proxy, acct.Email, acct.OrgUUID), sessionKey: key, proxy: proxy}
 		apiClients[acct.Email] = client
 	}
 	return client
@@ -69,9 +69,11 @@ var delConvSem = make(chan struct{}, 8)
 // Dispatcher 是当前 Claude.ai 号池的对话实现。
 type Dispatcher struct{}
 
-func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) (CompletionResult, error) {
+func (Dispatcher) completeStateless(reqModel string, prompt Prompt, onText func(string)) (CompletionResult, error) {
 	s := config.Get()
-	var res CompletionResult
+	model, mode := resolveReasoning(reqModel, prompt)
+	prompt.ThinkingMode = mode
+	res := CompletionResult{UpstreamModel: model, ThinkingMode: mode, Effort: prompt.Effort}
 
 	retries := s.RetryCount
 	if retries > 8 {
@@ -110,8 +112,7 @@ func (Dispatcher) Complete(reqModel string, prompt Prompt, onText func(string)) 
 			lease.ready = true
 		}
 
-		think := strings.HasSuffix(reqModel, "-thinking")
-		model := strings.TrimSuffix(reqModel, "-thinking")
+		think := mode == "extended"
 
 		if acct.OrgUUID == "" {
 			info, err := client.GetUserInfo()

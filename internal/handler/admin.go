@@ -186,9 +186,15 @@ func AdminDeleteKey(c *gin.Context) {
 func AdminListLogs(c *gin.Context) {
 	limit := atoiDefault(c.Query("limit"), 50)
 	offset := atoiDefault(c.Query("offset"), 0)
+	stats, err := repository.GetAPILogStats()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取调用统计失败"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"logs":  repository.ListAPILogs(limit, offset),
-		"total": repository.CountAPILogs(),
+		"total": stats.Calls,
+		"stats": stats,
 	})
 }
 

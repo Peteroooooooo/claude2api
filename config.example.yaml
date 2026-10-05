@@ -4,7 +4,11 @@ web_uc_host: localhost       # Artifacts 沙箱 Host 这里反代要两个域名
 admin_password: claude2api   # 管理密码
 status_check_seconds: 21600  # 监测间隔
 retry_count: 0               # 重试次数
-delete_chat: true            # 删除会话
+delete_chat: true            # 续聊开启时仅清理闲置会话；关闭时用完删除
+session_reuse: true          # 同一客户端会话持续使用原账号和普通网页对话
+session_idle_seconds: 86400  # 闲置 24 小时后清理会话映射
+quota_cooldown_seconds: 1800 # 额度耗尽且上游未提供恢复时间时，冷却 30 分钟
+rate_limit_wait_seconds: 10 # 短期限速最多等待 10 秒，不因此换账号
 max_history_length: 12000    # 附件阈值
 remove_invalid_account: false # 自动移除会话失效的账号
 detailed_api_log: true       # 记录完整 API 请求与输出

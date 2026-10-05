@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -16,15 +17,26 @@ func pretty(v any) string { b, _ := json.MarshalIndent(v, "", "  "); return stri
 
 const (
 	sdkTestBaseURL = "http://127.0.0.1:8787"
-	sdkTestAPIKey  = "claude2api"
 	sdkTestModel   = "claude-sonnet-5"
 )
 
 func sdkTestConfig(t *testing.T) (context.Context, string, string, string) {
 	t.Helper()
+	key := os.Getenv("CLAUDE2API_SDK_API_KEY")
+	if key == "" {
+		t.Skip("set CLAUDE2API_SDK_API_KEY to run live SDK tests")
+	}
+	base := os.Getenv("CLAUDE2API_SDK_BASE_URL")
+	if base == "" {
+		base = sdkTestBaseURL
+	}
+	model := os.Getenv("CLAUDE2API_SDK_MODEL")
+	if model == "" {
+		model = sdkTestModel
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	return ctx, sdkTestBaseURL, sdkTestAPIKey, sdkTestModel
+	return ctx, base, key, model
 }
 
 func requireToolCalls(t *testing.T, got []string, raw string) {

@@ -61,7 +61,7 @@ func normalizeOpenAIChatMessages(msgs []openAIMessage) ([]Message, []string) {
 	for _, m := range msgs {
 		text, imgs := flattenContent(m.Content)
 		images = append(images, imgs...)
-		am := Message{Role: m.Role, Content: text, ToolCallID: m.ToolCallID}
+		am := Message{Role: m.Role, Content: text, ToolCallID: m.ToolCallID, Images: imgs}
 		for _, tc := range m.ToolCalls {
 			am.ToolCalls = append(am.ToolCalls, ToolCall{
 				ID:        tc.ID,
@@ -133,10 +133,15 @@ func OpenAIChat(c *gin.Context) {
 		return
 	}
 	prompt.RawRequest = raw
+	if err := configureReasoning(raw, &prompt); err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	prompt.MaxTokens, prompt.Temperature, prompt.TopP, prompt.Stop = req.MaxTokens, req.Temperature, req.TopP, parseStops(req.Stop)
 	if prompt.MaxTokens == 0 {
 		prompt.MaxTokens = req.MaxCompletion
 	}
+	configureSession(c, &prompt, "chat/completions", len(tools) > 0)
 	if len(tools) > 0 {
 		if req.Stream {
 			openAIToolStream(c, model, prompt)
@@ -221,9 +226,9 @@ func openAIToolNonStream(c *gin.Context, model string, prompt service.Prompt) {
 	finish := "stop"
 	if parsed.IsToolCall() {
 		toolCalls := make([]gin.H, 0, len(parsed.ToolCalls))
-		for _, tc := range parsed.ToolCalls {
+		for i, tc := range parsed.ToolCalls {
 			toolCalls = append(toolCalls, gin.H{
-				"id":   newToolCallID(),
+				"id":   stableToolID(prompt, i, false),
 				"type": "function",
 				"function": gin.H{
 					"name":      tc.Name,
@@ -287,7 +292,7 @@ func openAIToolStream(c *gin.Context, model string, prompt service.Prompt) {
 			// 先发出带 id/name 的分片，再发出 arguments 分片。
 			stream.send(gin.H{"tool_calls": []gin.H{{
 				"index":    toolIndex,
-				"id":       newToolCallID(),
+				"id":       stableToolID(prompt, toolIndex, false),
 				"type":     "function",
 				"function": gin.H{"name": ev.Name, "arguments": ""},
 			}}}, nil)

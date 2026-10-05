@@ -67,3 +67,12 @@ func ValidateAPIKey(value string) bool {
 	}
 	return cnt > 0
 }
+
+func APIKeyID(value string) (int64, bool) {
+	var key APIKey
+	if value == "" || db == nil {
+		return 0, false
+	}
+	err := db.Select("id").Where("key = ? AND enabled = 1", value).First(&key).Error
+	return key.ID, err == nil
+}

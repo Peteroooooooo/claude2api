@@ -16,5 +16,7 @@ func main() {
 		return
 	}
 	service.StartAccountStatusMonitor()
+	defer repository.CloseDB()
+	service.StartSessionJanitor()
 	router.RunServer()
 }

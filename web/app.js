@@ -41,6 +41,10 @@ const CONFIG_FIELDS = [
   "retry_count",
   "max_chat_history_length",
   "chat_delete",
+	"session_reuse",
+	"session_idle_seconds",
+	"quota_cooldown_seconds",
+	"rate_limit_wait_seconds",
   "detailed_api_log",
   "status_check_interval_seconds",
   "remove_invalid_account",
@@ -50,6 +54,10 @@ const CONFIG_DEFAULTS = {
   retry_count: 0,
   max_chat_history_length: 12000,
   chat_delete: true,
+  session_reuse: true,
+  session_idle_seconds: 86400,
+  quota_cooldown_seconds: 1800,
+  rate_limit_wait_seconds: 10,
   detailed_api_log: false,
   status_check_interval_seconds: 21600,
   remove_invalid_account: false,
@@ -523,6 +531,8 @@ async function saveConfig() {
 }
 
 let chatHistory = [];
+const newChatSessionID = () => globalThis.crypto?.randomUUID?.() || `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let chatSessionID = newChatSessionID();
 let chatImages = [];
 
 function renderMarkdown(value) {
@@ -606,6 +616,7 @@ async function readChatImages(files) {
 }
 
 async function sendTestChat() {
+	if ($("#btn-test-send").disabled) return;
   const model = $("#test-model").value.trim();
   const key = authToken;
   const message = $("#test-message").value.trim();
@@ -637,6 +648,7 @@ async function sendTestChat() {
       headers: {
         "Content-Type": "application/json",
         Authorization: "Bearer " + key,
+        "X-Claude2API-Session-ID": chatSessionID,
       },
       body: JSON.stringify({
         model,
@@ -662,6 +674,7 @@ async function sendTestChat() {
         const raw = line.slice(6).trim();
         if (raw === "[DONE]") continue;
         const data = JSON.parse(raw);
+        if (data.error) throw new Error(data.error.message || "请求失败");
         const delta = data.choices?.[0]?.delta?.content || "";
         chatHistory[chatHistory.length - 1].content += delta;
         renderChat();
@@ -757,6 +770,33 @@ let logsPage = 1;
 let logsPageSize = 10;
 let logsTotal = 0;
 const fmtSeconds = (ms) => ms ? `${(ms / 1000).toFixed(2)} s` : "—";
+const fmtTPS = (log) => log.session_action === "replay" ? "复用" : log.duration_ms > 0 && log.output_tokens > 0 ? `≈${Number(log.tps || 0).toFixed(1)} TPS` : "—";
+
+function renderLogSummary(stats) {
+  const number = (value) => Number(value || 0).toLocaleString("zh-CN");
+  const compact = (value) => {
+    const n = Number(value || 0);
+    const unit = n >= 1e9 ? [1e9, "B"] : n >= 1e6 ? [1e6, "M"] : n >= 1e3 ? [1e3, "K"] : null;
+    return unit ? `${Number((n / unit[0]).toFixed(2))}${unit[1]}` : number(n);
+  };
+  const percent = (part, total) => total ? `${(part / total * 100).toFixed(1)}%` : "—";
+  const calls = stats?.calls || 0;
+  const totalTokens = stats?.total_tokens || 0;
+  const cards = [
+    {key:"calls", label:"调用", value:stats?.calls, foot:"全部保留日志", icon:'<path d="M4 5h16v14H4zM8 9h8M8 13h5"/>'},
+    {key:"success", label:"成功", value:stats?.success, foot:`成功率 ${percent(stats?.success || 0, calls)}`, ratio:calls ? stats.success / calls : 0, icon:'<path d="m5 12 4 4 10-10"/>'},
+    {key:"failed", label:"失败", value:stats?.failed, foot:`失败率 ${percent(stats?.failed || 0, calls)}`, ratio:calls ? stats.failed / calls : 0, icon:'<path d="m6 6 12 12M18 6 6 18"/>'},
+    {key:"tokens", label:"总 Token", value:stats?.total_tokens, foot:"输入 + 输出", compact:true, icon:'<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M9 9h6M12 9v6"/>'},
+    {key:"input", label:"输入 Token", value:stats?.input_tokens, foot:`占总量 ${percent(stats?.input_tokens || 0, totalTokens)}`, compact:true, ratio:totalTokens ? stats.input_tokens / totalTokens : 0, icon:'<path d="M12 3v12m-4-4 4 4 4-4M5 17v4h14v-4"/>'},
+    {key:"output", label:"输出 Token", value:stats?.output_tokens, foot:`占总量 ${percent(stats?.output_tokens || 0, totalTokens)}`, compact:true, ratio:totalTokens ? stats.output_tokens / totalTokens : 0, icon:'<path d="M12 16V4m-4 4 4-4 4 4M5 17v4h14v-4"/>'},
+  ];
+  $("#logs-summary").innerHTML = cards.map((card) => `<article class="log-metric log-metric-${card.key}">
+    <div class="log-metric-label"><span class="log-metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${card.icon}</svg></span>${card.label}</div>
+    <b class="log-metric-value" title="${stats ? number(card.value) : "统计暂不可用"}">${stats ? card.compact ? compact(card.value) : number(card.value) : "—"}</b>
+    <div class="log-metric-foot">${stats ? card.foot : "统计暂不可用"}</div>
+    ${card.ratio != null ? `<div class="log-metric-track" aria-hidden="true"><i style="width:${Math.max(0, Math.min(100, card.ratio * 100))}%"></i></div>` : ""}
+  </article>`).join("");
+}
 
 async function loadLogs() {
   const body = $("#logs-body");
@@ -765,28 +805,31 @@ async function loadLogs() {
     const data = await api(`/api/logs?limit=${logsPageSize}&offset=${offset}`);
     const logs = data.logs || [];
     logsTotal = data.total || 0;
-    const success = logs.filter((l) => l.success).length;
-    const avgTPS = logs.length ? logs.reduce((n, l) => n + (l.tps || 0), 0) / logs.length : 0;
-    $("#logs-stats").innerHTML = `<span><small>调用</small><b>${logsTotal}</b></span><span><small>成功</small><b>${success}/${logs.length}</b></span><span><small>TPS</small><b>${avgTPS.toFixed(1)}</b></span>`;
+    renderLogSummary(data.stats);
+    const measuredLogs = logs.filter((l) => l.session_action !== "replay" && l.duration_ms > 0 && l.output_tokens > 0);
+    const avgTPS = measuredLogs.length ? measuredLogs.reduce((n, l) => n + (l.tps || 0), 0) / measuredLogs.length : 0;
+    $("#logs-stats").innerHTML = `<span><small>本页平均 TPS</small><b>${measuredLogs.length ? "≈" + avgTPS.toFixed(1) : "—"}</b></span>`;
     if (!logs.length) {
-      body.innerHTML = `<tr><td colspan="8" class="empty">暂无调用日志</td></tr>`;
+      body.innerHTML = `<tr><td colspan="9" class="empty">暂无调用日志</td></tr>`;
       updateLogSelection();
       renderLogsPager();
       return;
     }
     body.innerHTML = logs
       .map((l) => {
+        const sessionLabel = ({new:"新建",continue:"续聊",rebuild:"重建",switch:"换号",replay:"结果复用",interrupted:"中断"})[l.session_action];
         const status = l.success
           ? `<span class="log-status ok"><i></i>成功</span>`
           : `<span class="log-status err" title="${esc(l.error || "")}"><i></i>失败</span>`;
         return `<tr data-log-id="${l.id}">
         <td><input class="log-check" type="checkbox" value="${l.id}" aria-label="选择日志 ${l.id}"></td>
         <td class="log-time"><b>${esc(fmtTime(l.created_at).split(" ")[1] || "—")}</b><span>${esc(fmtTime(l.created_at).split(" ")[0] || "")}</span></td>
-        <td class="log-request"><b>${esc(l.endpoint)} <em>${l.stream ? "流" : "非流"}</em></b><span class="mono">${esc(l.model || "—")}</span></td>
+        <td class="log-request"><b>${esc(l.endpoint)} <em>${l.stream ? "流" : "非流"}</em>${sessionLabel ? ` <small class="log-session-badge">${esc(sessionLabel)}</small>` : ""}</b><span class="mono">${esc(l.model || "—")}</span></td>
+        <td class="log-reasoning">${l.thinking_mode ? `<span>思考 <b class="${l.thinking_mode === "extended" ? "enabled" : ""}">${esc(l.thinking_mode === "extended" ? l.effort || "默认" : "关闭")}</b></span>${l.thinking_mode === "off" && l.effort ? `<span>强度 <b>${esc(l.effort)}</b></span>` : ""}` : "—"}</td>
         <td class="log-account" title="${esc(l.account || "")}">${esc(l.account || "—")}</td>
         <td>${status}<span class="log-code">HTTP ${l.status_code || "—"}</span></td>
         <td class="log-token mono"><b>${l.input_tokens || 0}</b><i>→</i><b>${l.output_tokens || 0}</b></td>
-        <td class="log-performance"><b>${fmtSeconds(l.first_token_ms)}</b><span>${Number(l.tps || 0).toFixed(1)} TPS · ${fmtSeconds(l.duration_ms)}</span></td>
+        <td class="log-performance"><b>${fmtSeconds(l.first_token_ms)}</b><span title="估算输出 Token ÷ 总耗时">${fmtTPS(l)} · ${fmtSeconds(l.duration_ms)}</span></td>
         <td><button class="log-open act-log-detail" data-id="${l.id}" aria-label="查看调用 ${l.id}">查看<span>→</span></button></td>
       </tr>`;
       })
@@ -794,7 +837,9 @@ async function loadLogs() {
     updateLogSelection();
     renderLogsPager();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    renderLogSummary();
+    $("#logs-stats").innerHTML = "";
     updateLogSelection();
   }
 }
@@ -843,10 +888,13 @@ async function showLogDetail(id) {
       <div class="log-detail-meta">
         ${logMeta("请求", l.endpoint, l.model || "—")}
         ${logMeta("账号", l.account || "—")}
+		${l.session_action ? logMeta("会话", ({new:"新建",continue:"续聊",rebuild:"重建",switch:"换号恢复",replay:"重复请求复用",interrupted:"中断"})[l.session_action] || l.session_action, `本轮上传 ${l.upstream_input_bytes || 0} 字节${l.switch_reason ? " · " + l.switch_reason : ""}`) : ""}
+		${l.upstream_model ? logMeta("上游模型", l.upstream_model, `thinking_mode=${l.thinking_mode || "默认"} · effort=${l.effort || "网页默认"}`) : ""}
         ${logMeta("结果", `${l.success ? "成功" : "失败"} · HTTP ${l.status_code || "—"}`, fmtTime(l.created_at))}
-        ${logMeta("性能", `${fmtSeconds(l.first_token_ms)} 首字`, `${Number(l.tps || 0).toFixed(1)} TPS · ${fmtSeconds(l.duration_ms)} 总耗时`)}
+        ${logMeta("性能", `${fmtSeconds(l.first_token_ms)} 首字`, `${fmtTPS(l)} · ${fmtSeconds(l.duration_ms)} 总耗时`)}
       </div>
       ${l.error ? `<div class="log-error-box"><b>请求错误</b><span>${esc(l.error)}</span></div>` : ""}
+	  ${l.conversation_id ? `<details class="log-tools"><summary>会话续聊详情</summary><pre>${esc(JSON.stringify({session_id:l.session_id,conversation_id:l.conversation_id,parent_uuid:l.parent_uuid,message_uuid:l.message_uuid},null,2))}</pre></details>` : ""}
       <section class="log-detail-section"><div class="log-section-head"><div><small>REQUEST</small><h3>请求消息</h3></div><span>${l.input_tokens || 0} tokens</span></div>${renderLogRequest(l.request)}</section>
       <section class="log-detail-section"><div class="log-section-head"><div><small>RESPONSE</small><h3>模型输出</h3></div><span>${l.output_tokens || 0} tokens</span></div>${l.response ? `<div class="log-response">${renderMarkdown(l.response)}</div>` : detailDisabled()}</section>`;
     switchPage("log-detail");
@@ -985,6 +1033,8 @@ $("#btn-logout").addEventListener("click", logout);
 $("#btn-key-create").addEventListener("click", createKey);
 $("#btn-test-send").addEventListener("click", sendTestChat);
 $("#btn-chat-clear").addEventListener("click", () => {
+	if ($("#btn-test-send").disabled) return;
+  chatSessionID = newChatSessionID();
   chatHistory = [];
   chatImages = [];
   $("#chat-attachments").innerHTML = "";

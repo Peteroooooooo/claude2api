@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,13 +23,14 @@ const (
 	defaultModel    = "claude-sonnet-4-6"
 )
 
-var supportedModels = []string{defaultModel, "claude-haiku-4-5-20251001", "claude-sonnet-5"}
+var supportedModels = []string{defaultModel, "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"}
 
 type Message struct {
 	Role       string
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
+	Images     []string
 }
 
 type Runner interface {
@@ -82,12 +84,21 @@ func buildPrompt(messages []Message, images []string, tools []map[string]any, pa
 	}
 	var err error
 	prompt.Images, err = prepareImages(images)
+	if err != nil {
+		return prompt, err
+	}
+	if err = prepareHistory(&prompt, messages, tools, parallel, toolChoice); err != nil {
+		return prompt, err
+	}
 	return prompt, err
 }
 
 // sanitizeSystemPrompt removes client-specific identity boilerplate while
 // preserving the caller's actual system instructions.
+var clientTokenBudget = regexp.MustCompile(`(?s)<total_tokens>\s*\d+\s+tokens left\s*</total_tokens>`)
+
 func sanitizeSystemPrompt(text string) string {
+	text = clientTokenBudget.ReplaceAllString(text, "")
 	// Codex CLI 会附带一整段运行时 system prompt（包含工具协议、身份
 	// 和安全说明）。Claude.ai 不认识这套协议；如果把它拼进普通文本，
 	// 它会把后续用户请求误判成嵌入的 Codex transcript。此类 system
@@ -158,9 +169,9 @@ func logCompletion(endpoint, model string, stream bool, prompt service.Prompt, o
 		Success: err == nil, StatusCode: res.StatusCode,
 		InputTokens: tokenCount(prompt.Text), OutputTokens: outputTokens,
 		DurationMs: durationMs, FirstTokenMs: firstTokenMs,
-	}
-	if generationMs := durationMs - firstTokenMs; generationMs > 0 {
-		log.TPS = float64(outputTokens) * 1000 / float64(generationMs)
+		SessionID: res.SessionID, ConversationID: res.ConversationID, ParentUUID: res.ParentUUID, MessageUUID: res.MessageUUID,
+		SessionAction: res.Action, UpstreamInputBytes: res.InputBytes, SwitchReason: res.SwitchReason,
+		UpstreamModel: res.UpstreamModel, ThinkingMode: res.ThinkingMode, Effort: res.Effort,
 	}
 	if config.Get().DetailedAPILog {
 		log.Request, log.Response = prompt.RawRequest, output

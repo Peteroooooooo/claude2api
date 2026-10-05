@@ -16,6 +16,11 @@ var db *gorm.DB
 
 // InitDB 初始化数据库。
 func InitDB() error {
+	if db != nil {
+		if err := CloseDB(); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(config.DataDir(), 0o755); err != nil {
 		return fmt.Errorf("创建数据目录失败: %w", err)
 	}
@@ -29,11 +34,24 @@ func InitDB() error {
 	if sqlDB, err := conn.DB(); err == nil {
 		sqlDB.SetMaxOpenConns(1)
 	}
-	if err := conn.AutoMigrate(&Account{}, &APIKey{}, &APILog{}); err != nil {
+	if err := conn.AutoMigrate(&Account{}, &APIKey{}, &APILog{}, &ChatSession{}, &ChatTurn{}, &AccountCooldown{}, &ChatConversation{}); err != nil {
 		return fmt.Errorf("建表失败: %w", err)
 	}
 	db = conn
 	return nil
+}
+
+func CloseDB() error {
+	if db == nil {
+		return nil
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	err = sqlDB.Close()
+	db = nil
+	return err
 }
 
 // nowUTC 返回 UTC 时间戳。

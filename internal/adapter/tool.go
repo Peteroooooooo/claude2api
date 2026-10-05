@@ -16,7 +16,11 @@ type ToolCall struct {
 }
 
 func buildToolPrompt(messages []Message, tools []map[string]any, parallel bool) service.Prompt {
-	parts := []string{FormatTaggedPrompt(tools, parallel)}
+	return service.Prompt{Text: FormatTaggedPrompt(tools, parallel) + "\n\n" + renderMessages(messages, parallel)}
+}
+
+func renderMessages(messages []Message, parallel bool) string {
+	var parts []string
 	for _, message := range messages {
 		switch message.Role {
 		case "system":
@@ -34,7 +38,7 @@ func buildToolPrompt(messages []Message, tools []map[string]any, parallel bool) 
 			parts = append(parts, fmt.Sprintf("Verbatim JSON-string result from tool call_id=%s:\n<tool_result_json>%s</tool_result_json>", message.ToolCallID, result))
 		}
 	}
-	return service.Prompt{Text: strings.Join(parts, "\n\n")}
+	return strings.Join(parts, "\n\n")
 }
 
 func toolChoiceInstruction(raw json.RawMessage) string {

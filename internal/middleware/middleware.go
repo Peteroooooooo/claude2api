@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -104,10 +105,12 @@ func APIKey() gin.HandlerFunc {
 		}
 		// 后台在线测试可复用管理密码。
 		if pw := config.Get().AdminPassword; pw != "" && token == pw {
+			c.Set("api_scope", "admin")
 			c.Next()
 			return
 		}
-		if repository.ValidateAPIKey(token) {
+		if id, ok := repository.APIKeyID(token); ok {
+			c.Set("api_scope", fmt.Sprintf("key:%d", id))
 			c.Next()
 			return
 		}

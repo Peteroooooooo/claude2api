@@ -48,7 +48,12 @@ func OpenAIResponses(c *gin.Context) {
 		return
 	}
 	prompt.RawRequest = raw
+	if err := configureReasoning(raw, &prompt); err != nil {
+		apiError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	prompt.MaxTokens, prompt.Temperature, prompt.TopP = req.MaxTokens, req.Temperature, req.TopP
+	configureSession(c, &prompt, "responses", len(tools) > 0)
 	if len(tools) > 0 {
 		if req.Stream {
 			responsesToolStream(c, model, prompt)
@@ -108,7 +113,7 @@ func normalizeResponseInput(raw json.RawMessage) ([]Message, []string) {
 		content, imgs := flattenResponseContent(item["content"])
 		images = append(images, imgs...)
 		if content != "" || len(imgs) > 0 {
-			msgs = append(msgs, Message{Role: role, Content: content})
+			msgs = append(msgs, Message{Role: role, Content: content, Images: imgs})
 		}
 	}
 	return msgs, images
@@ -266,8 +271,8 @@ func responsesToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 	created := time.Now().Unix()
 	if parsed.IsToolCall() {
 		output := make([]gin.H, 0, len(parsed.ToolCalls))
-		for _, tc := range parsed.ToolCalls {
-			output = append(output, functionCallItem(newToolCallID(), tc.Name, argsJSON(tc.Arguments)))
+		for i, tc := range parsed.ToolCalls {
+			output = append(output, functionCallItem(stableToolID(prompt, i, false), tc.Name, argsJSON(tc.Arguments)))
 		}
 		out := gin.H{
 			"id": id, "object": "response", "created_at": created, "status": "completed",
@@ -299,6 +304,7 @@ func responsesToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream.emit("response.in_progress", gin.H{"response": base})
 
 	outputIndex := 0
+	toolIndex := 0
 	var output []gin.H
 	// 文本块（thinking/final_answer）用 message item 承载，仅在需要时开启。
 	textItemID := "msg_" + shortID()
@@ -348,7 +354,8 @@ func responsesToolStream(c *gin.Context, model string, prompt service.Prompt) {
 			// Internal thinking is discarded.
 		case EventToolCall:
 			closeTextItem()
-			callID := newToolCallID()
+			callID := stableToolID(prompt, toolIndex, false)
+			toolIndex++
 			args := argsJSON(ev.Arguments)
 			fcItemID := "fc_" + shortID()
 			item := gin.H{"id": fcItemID, "type": "function_call", "status": "in_progress",

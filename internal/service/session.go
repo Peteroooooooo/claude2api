@@ -19,7 +19,7 @@ import (
 const rootMessageUUID = "00000000-0000-4000-8000-000000000000"
 
 type sessionLock struct {
-	sync.Mutex
+	contextMutex
 	refs int
 }
 
@@ -28,6 +28,10 @@ var sessionLocks = map[string]*sessionLock{}
 var newAPIClient = NewClaudeAI
 
 func lockSession(key string, try bool) (func(), bool) {
+	return lockSessionContext(context.Background(), key, try)
+}
+
+func lockSessionContext(ctx context.Context, key string, try bool) (func(), bool) {
 	sessionLockMu.Lock()
 	entry := sessionLocks[key]
 	if entry == nil {
@@ -50,7 +54,10 @@ func lockSession(key string, try bool) (func(), bool) {
 			return nil, false
 		}
 	} else {
-		entry.Lock()
+		if entry.LockContext(ctx) != nil {
+			releaseRef()
+			return nil, false
+		}
 	}
 	return func() { entry.Unlock(); releaseRef() }, true
 }
@@ -175,16 +182,22 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 		return dispatcher.completeStateless(reqModel, prompt, onText)
 	}
 	key := sessionKey(prompt)
-	unlock, _ := lockSession(key, false)
-	defer unlock()
 	res := CompletionResult{SessionID: prompt.SessionID, UpstreamModel: model, ThinkingMode: mode, Effort: prompt.Effort}
 	fail := func(code int, err error) (CompletionResult, error) {
+		if prompt.Context != nil && prompt.Context.Err() != nil {
+			code, err = 499, prompt.Context.Err()
+		}
 		if code < 400 {
 			code = 502
 		}
 		res.StatusCode = code
 		return res, &CompletionError{StatusCode: code, Err: err}
 	}
+	unlock, ok := lockSessionContext(prompt.Context, key, false)
+	if !ok {
+		return fail(499, prompt.Context.Err())
+	}
+	defer unlock()
 	requestKey := turnKey(key, reqModel, prompt)
 	if prompt.TurnID != nil {
 		*prompt.TurnID = requestKey[:24]
@@ -257,7 +270,9 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 			reuse, targetReady = false, false
 		}
 		lease := clientFor(account, s.Proxy)
-		lease.Lock()
+		if err = lease.LockContext(prompt.Context); err != nil {
+			return fail(499, err)
+		}
 		client := lease.ClaudeAI
 		if !lease.ready {
 			err = client.WarmUp()
@@ -371,6 +386,14 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 		})
 		lease.Unlock()
 		res.MessageUUID = turn.MessageUUID
+		if sendErr != nil && prompt.Context != nil && prompt.Context.Err() != nil {
+			turn.Status, turn.Response, turn.Error, turn.StatusCode = "interrupted", output.String(), prompt.Context.Err().Error(), 499
+			session.ParentUUID = ""
+			if err = repository.CommitChatTurn(&session, &turn); err != nil {
+				return fail(500, err)
+			}
+			return fail(499, prompt.Context.Err())
+		}
 		var upstream *webError
 		if errors.As(sendErr, &upstream) {
 			code = upstream.Status

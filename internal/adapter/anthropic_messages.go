@@ -248,6 +248,7 @@ func (s *messageStream) stop(reason string, outputTokens int) {
 
 func anthropicStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream := newMessageStream(c, model, prompt)
+	defer stream.finish()
 	stream.open(gin.H{"type": "text", "text": ""})
 	text, err := runAndCollect("messages", model, true, prompt, func(text string) {
 		stream.delta(gin.H{"type": "text_delta", "text": text})
@@ -310,6 +311,7 @@ func anthropicToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 // anthropicToolStream 带 tools 的流式：把标签事件转成 Anthropic content_block 事件。
 func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream := newMessageStream(c, model, prompt)
+	defer stream.finish()
 	stopReason := "end_turn"
 	toolIndex := 0
 

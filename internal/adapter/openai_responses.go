@@ -196,6 +196,7 @@ func (s *responseStream) emit(event string, payload gin.H) {
 
 func responsesStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream := newResponseStream(c)
+	defer stream.finish()
 	id := "resp_" + shortID()
 	created := time.Now().Unix()
 	base := responseObject(id, model, "in_progress", "", created)
@@ -295,6 +296,7 @@ func responsesToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 // responsesToolStream 带 tools 的流式：把标签事件转成 Responses 事件。
 func responsesToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream := newResponseStream(c)
+	defer stream.finish()
 	id := "resp_" + shortID()
 	created := time.Now().Unix()
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -230,11 +231,19 @@ func (f *outputFilter) push(text string, final bool) string {
 }
 
 type sseWriter struct {
-	w       gin.ResponseWriter
-	flusher http.Flusher
+	w        gin.ResponseWriter
+	flusher  http.Flusher
+	mu       sync.Mutex
+	stop     chan struct{}
+	finished chan struct{}
+	once     sync.Once
 }
 
 func newSSE(c *gin.Context) *sseWriter {
+	return newSSEWithInterval(c, 15*time.Second)
+}
+
+func newSSEWithInterval(c *gin.Context, interval time.Duration) *sseWriter {
 	h := c.Writer.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -242,10 +251,40 @@ func newSSE(c *gin.Context) *sseWriter {
 	h.Set("X-Accel-Buffering", "no")
 	c.Writer.WriteHeader(http.StatusOK)
 	flusher, _ := c.Writer.(http.Flusher)
-	return &sseWriter{c.Writer, flusher}
+	s := &sseWriter{w: c.Writer, flusher: flusher, stop: make(chan struct{}), finished: make(chan struct{})}
+	go func() {
+		defer close(s.finished)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.Request.Context().Done():
+				return
+			case <-s.stop:
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				// SSE comments keep every supported protocol alive without adding output tokens.
+				fmt.Fprint(s.w, ": keep-alive\n\n")
+				if s.flusher != nil {
+					s.flusher.Flush()
+				}
+				s.mu.Unlock()
+			}
+		}
+	}()
+	return s
+}
+
+// finish joins the heartbeat before Gin reuses the request's writer.
+func (s *sseWriter) finish() {
+	s.once.Do(func() { close(s.stop) })
+	<-s.finished
 }
 
 func (s *sseWriter) write(prefix string, payload any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	b, _ := json.Marshal(payload)
 	fmt.Fprintf(s.w, "%s%s\n\n", prefix, b)
 	if s.flusher != nil {
@@ -260,6 +299,8 @@ func (s *sseWriter) event(name string, payload any) {
 }
 
 func (s *sseWriter) done() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	fmt.Fprint(s.w, "data: [DONE]\n\n")
 	if s.flusher != nil {
 		s.flusher.Flush()

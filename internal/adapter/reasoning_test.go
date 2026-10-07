@@ -18,6 +18,7 @@ func TestReasoningParametersReachAllProtocols(t *testing.T) {
 		handler    gin.HandlerFunc
 	}{
 		{"messages", `{"model":"claude-sonnet-5-5","thinking":{"type":"adaptive","display":"updates"},"output_config":{"effort":"max"},"messages":[{"role":"user","content":"hello"}]}`, AnthropicMessages},
+		{"messages-medium", `{"model":"claude-sonnet-5-5-thinking","thinking":{"type":"disabled"},"output_config":{"effort":"medium"},"messages":[{"role":"user","content":"hello"}]}`, AnthropicMessages},
 		{"chat", `{"model":"claude-sonnet-5-5","reasoning_effort":"max","messages":[{"role":"user","content":"hello"}]}`, OpenAIChat},
 		{"responses", `{"model":"claude-sonnet-5-5","reasoning":{"effort":"max"},"input":"hello"}`, OpenAIResponses},
 	}
@@ -26,11 +27,18 @@ func TestReasoningParametersReachAllProtocols(t *testing.T) {
 			called := false
 			runner = testRunner(func(model string, p service.Prompt, emit func(string)) (service.CompletionResult, error) {
 				called = true
-				if model != "claude-sonnet-5-5" || p.Effort != "max" {
+				wantModel, wantEffort := "claude-sonnet-5-5", "max"
+				if tc.name == "messages-medium" {
+					wantModel, wantEffort = "claude-sonnet-5-5-thinking", "medium"
+				}
+				if model != wantModel || p.Effort != wantEffort {
 					t.Fatalf("lost parameters: model=%s effort=%s", model, p.Effort)
 				}
 				if tc.name == "messages" && (p.ThinkingMode != "extended" || p.ThinkingDisplay != "updates") {
 					t.Fatalf("thinking lost: %+v", p)
+				}
+				if tc.name == "messages-medium" && p.ThinkingMode != "off" {
+					t.Fatal("explicit thinking disabled was lost")
 				}
 				emit("SAVED")
 				return service.CompletionResult{StatusCode: 200}, nil

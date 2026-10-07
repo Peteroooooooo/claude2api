@@ -32,12 +32,13 @@ const claudeAIUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
 type ClaudeAI struct {
-	orgUUID  string
-	client   tlsclient.HttpClient
-	headers  map[string]string
-	modeMu   sync.Mutex
-	modeSet  bool
-	thinking bool
+	requestContext context.Context // Bound while the dispatcher holds the account lease.
+	orgUUID        string
+	client         tlsclient.HttpClient
+	headers        map[string]string
+	modeMu         sync.Mutex
+	modeSet        bool
+	thinking       bool
 }
 
 // NewClaudeAI 构造 Claude Web 客户端。
@@ -66,7 +67,11 @@ func NewClaudeAI(sessionKey, proxy, identity string, orgUUID ...string) *ClaudeA
 }
 
 func (claudeAI *ClaudeAI) request(method, target string, body io.Reader) (*fhttp.Request, error) {
-	req, err := fhttp.NewRequest(method, target, body)
+	ctx := claudeAI.requestContext
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := fhttp.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +397,9 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "text/event-stream, text/event-stream")
+	if prompt.Context != nil {
+		req = req.WithContext(prompt.Context)
+	}
 	req.Header.Set("cache-control", "no-cache")
 	req.Header.Set("referer", claudeAIBaseURL+"/chat/"+convID)
 
@@ -490,7 +498,7 @@ func parseCompletionSSEWithThinking(raw io.Reader, onText func(string), showThin
 		}
 		if ev.Type == "message_stop" {
 			messageStopped = true
-			continue
+			break
 		}
 		switch ev.ContentBlock.Type {
 		case "tool_use":

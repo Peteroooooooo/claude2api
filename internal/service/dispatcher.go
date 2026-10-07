@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -17,11 +18,24 @@ var (
 )
 
 type accountClient struct {
-	sync.Mutex
+	contextMutex
 	*ClaudeAI
 	sessionKey string
 	proxy      string
 	ready      bool
+}
+
+func (c *accountClient) LockContext(ctx context.Context) error {
+	if err := c.contextMutex.LockContext(ctx); err != nil {
+		return err
+	}
+	c.requestContext = ctx
+	return nil
+}
+
+func (c *accountClient) Unlock() {
+	c.requestContext = nil
+	c.contextMutex.Unlock()
 }
 
 func clientFor(acct *repository.Account, proxy string) *accountClient {
@@ -93,6 +107,10 @@ func (Dispatcher) completeStateless(reqModel string, prompt Prompt, onText func(
 
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
+		if prompt.Context != nil && prompt.Context.Err() != nil {
+			res.StatusCode = 499
+			return res, &CompletionError{StatusCode: 499, Err: prompt.Context.Err()}
+		}
 		acct := pickAPIAccount()
 		if acct == nil {
 			return res, fmt.Errorf("号池中没有可用账号")
@@ -100,7 +118,10 @@ func (Dispatcher) completeStateless(reqModel string, prompt Prompt, onText func(
 		email := acct.Email
 		res.Account = email
 		lease := clientFor(acct, s.Proxy)
-		lease.Lock()
+		if err := lease.LockContext(prompt.Context); err != nil {
+			res.StatusCode = 499
+			return res, &CompletionError{StatusCode: 499, Err: err}
+		}
 		client := lease.ClaudeAI
 		if !lease.ready {
 			if err := client.WarmUp(); err != nil {

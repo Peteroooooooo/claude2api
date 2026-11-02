@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 
 	"claude2api/internal/repository"
 )
@@ -20,8 +21,9 @@ type ClaudeAccount struct {
 	EmailAddress string `json:"email_address"`
 	Memberships  []struct {
 		Organization struct {
-			UUID             string `json:"uuid"`
-			SubscriptionPlan string `json:"analytics_subscription_plan"`
+			UUID             string   `json:"uuid"`
+			SubscriptionPlan string   `json:"analytics_subscription_plan"`
+			Capabilities     []string `json:"capabilities"`
 			Models           []struct {
 				ID           string   `json:"model"`
 				Name         string   `json:"name"`
@@ -38,7 +40,25 @@ func (account ClaudeAccount) UserInfo() *UserInfo {
 	if len(account.Memberships) == 0 {
 		return info
 	}
+	// 同一登录可能同时属于 API Console 组织（capabilities 为 api、套餐 api_*）
+	// 和 Claude.ai 聊天组织（capabilities 含 chat）。Console 组织同样带模型目录，
+	// 但网页对话和镜像访问它会 403，所以优先选聊天组织，其次选非 api_ 套餐。
 	organization := account.Memberships[0].Organization
+	chosen := false
+	for _, membership := range account.Memberships {
+		if slices.Contains(membership.Organization.Capabilities, "chat") {
+			organization, chosen = membership.Organization, true
+			break
+		}
+	}
+	for _, membership := range account.Memberships {
+		if chosen {
+			break
+		}
+		if !strings.HasPrefix(membership.Organization.SubscriptionPlan, "api_") {
+			organization, chosen = membership.Organization, true
+		}
+	}
 	info.OrgUUID = organization.UUID
 	info.SubscriptionPlan = organization.SubscriptionPlan
 	for _, model := range organization.Models {

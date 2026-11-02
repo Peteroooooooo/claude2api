@@ -40,3 +40,18 @@ func TestModelsFromCapturedFreeAccount(t *testing.T) {
 		t.Fatal("未同步套餐的账号不能开放模型")
 	}
 }
+
+func TestUserInfoPrefersChatOrganization(t *testing.T) {
+	body := `{"email_address":"pro@example.com","memberships":[
+		{"organization":{"uuid":"console-org","analytics_subscription_plan":"api_individual","capabilities":["api","api_individual"],"claude_ai_bootstrap_models_config":[{"model":"claude-opus-5-5","name":"Claude Opus 5.5"}]}},
+		{"organization":{"uuid":"chat-org","analytics_subscription_plan":"claude_pro","capabilities":["claude_pro","chat"],"claude_ai_bootstrap_models_config":[{"model":"claude-opus-5-5","name":"Claude Opus 5.5","paprika_modes":["extended"]}]}}
+	]}`
+	var account ClaudeAccount
+	if err := json.Unmarshal([]byte(body), &account); err != nil {
+		t.Fatal(err)
+	}
+	info := account.UserInfo()
+	if info.OrgUUID != "chat-org" || info.SubscriptionPlan != "claude_pro" || len(info.Models) != 1 {
+		t.Fatalf("应选择聊天组织，实际 %+v", info)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"claude2api/internal/repository"
 	"claude2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -14,20 +15,34 @@ import (
 func ListModels(c *gin.Context) {
 	now := time.Now().Unix()
 	data := make([]gin.H, 0)
-	for _, id := range supportedModels {
-		for _, model := range []string{id, id + "-thinking"} {
-			data = append(data, gin.H{
-				"id": model, "object": "model", "created": now, "owned_by": "anthropic",
-			})
+	seen := map[string]bool{}
+	for _, account := range repository.LoadAccounts() {
+		if !service.AccountUsable(&account) {
+			continue
+		}
+		for _, model := range service.AccountModels(&account) {
+			ids := []string{model.ID}
+			if model.Thinking {
+				ids = append(ids, model.ID+"-thinking")
+			}
+			for _, id := range ids {
+				if !seen[id] {
+					seen[id] = true
+					data = append(data, gin.H{"id": id, "object": "model", "created": now, "owned_by": "anthropic", "name": model.Name, "context_window": model.ContextWindow})
+				}
+			}
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": data})
 }
 
 type openAIChatRequest struct {
-	Model             string          `json:"model"`
-	Messages          []openAIMessage `json:"messages"`
-	Stream            bool            `json:"stream"`
+	Model         string          `json:"model"`
+	Messages      []openAIMessage `json:"messages"`
+	Stream        bool            `json:"stream"`
+	StreamOptions struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options"`
 	Tools             json.RawMessage `json:"tools"`
 	ParallelToolCalls json.RawMessage `json:"parallel_tool_calls"`
 	ToolChoice        json.RawMessage `json:"tool_choice"`
@@ -144,7 +159,7 @@ func OpenAIChat(c *gin.Context) {
 	configureSession(c, &prompt, "chat/completions", len(tools) > 0)
 	if len(tools) > 0 {
 		if req.Stream {
-			openAIToolStream(c, model, prompt)
+			openAIToolStream(c, model, prompt, req.StreamOptions.IncludeUsage)
 		} else {
 			openAIToolNonStream(c, model, prompt)
 		}
@@ -152,14 +167,14 @@ func OpenAIChat(c *gin.Context) {
 	}
 
 	if req.Stream {
-		openAIStream(c, model, prompt)
+		openAIStream(c, model, prompt, req.StreamOptions.IncludeUsage)
 	} else {
 		openAINonStream(c, model, prompt)
 	}
 }
 
 func openAINonStream(c *gin.Context, model string, prompt service.Prompt) {
-	content, ok := runNonStream(c, "chat/completions", model, prompt)
+	content, usage, ok := runNonStream(c, "chat/completions", model, prompt)
 	if !ok {
 		return
 	}
@@ -174,9 +189,9 @@ func openAINonStream(c *gin.Context, model string, prompt service.Prompt) {
 			"finish_reason": "stop",
 		}},
 		"usage": gin.H{
-			"prompt_tokens":     tokenCount(prompt.Text),
-			"completion_tokens": tokenCount(content),
-			"total_tokens":      tokenCount(prompt.Text) + tokenCount(content),
+			"prompt_tokens":     usage.InputTokens,
+			"completion_tokens": usage.OutputTokens + usage.ThinkingTokens,
+			"total_tokens":      usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens,
 		},
 	})
 }
@@ -199,23 +214,37 @@ func (s *chatStream) send(delta gin.H, finish any) {
 	})
 }
 
-func openAIStream(c *gin.Context, model string, prompt service.Prompt) {
+func (s *chatStream) complete(reason string, usage repository.TextUsage, includeUsage bool) {
+	s.send(gin.H{}, reason)
+	if includeUsage {
+		s.data(gin.H{
+			"id": s.id, "object": "chat.completion.chunk", "created": s.created, "model": s.model,
+			"choices": []any{}, "usage": gin.H{
+				"prompt_tokens":     usage.InputTokens,
+				"completion_tokens": usage.OutputTokens + usage.ThinkingTokens,
+				"total_tokens":      usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens,
+			},
+		})
+	}
+	s.done()
+}
+
+func openAIStream(c *gin.Context, model string, prompt service.Prompt, includeUsage bool) {
 	stream := newChatStream(c, model)
 	defer stream.finish()
 	stream.send(gin.H{"role": "assistant"}, nil)
-	_, err := runAndCollect("chat/completions", model, true, prompt, func(text string) {
+	_, usage, err := runAndCollect("chat/completions", model, true, prompt, func(text string) {
 		stream.send(gin.H{"content": text}, nil)
 	})
 	if err != nil {
 		stream.send(gin.H{"content": "\n[错误] " + err.Error()}, nil)
 	}
-	stream.send(gin.H{}, "stop")
-	stream.done()
+	stream.complete("stop", usage, includeUsage)
 }
 
 // openAIToolNonStream 带 tools 的非流式：解析标签协议后输出 tool_calls 或最终答案。
 func openAIToolNonStream(c *gin.Context, model string, prompt service.Prompt) {
-	raw, ok := runNonStream(c, "chat/completions", model, prompt)
+	raw, usage, ok := runNonStream(c, "chat/completions", model, prompt)
 	if !ok {
 		return
 	}
@@ -259,21 +288,21 @@ func openAIToolNonStream(c *gin.Context, model string, prompt service.Prompt) {
 			"finish_reason": finish,
 		}},
 		"usage": gin.H{
-			"prompt_tokens":     tokenCount(prompt.Text),
-			"completion_tokens": tokenCount(raw),
-			"total_tokens":      tokenCount(prompt.Text) + tokenCount(raw),
+			"prompt_tokens":     usage.InputTokens,
+			"completion_tokens": usage.OutputTokens + usage.ThinkingTokens,
+			"total_tokens":      usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens,
 		},
 	})
 }
 
 // openAIToolStream 带 tools 的流式：把标签事件转成 OpenAI delta。
-func openAIToolStream(c *gin.Context, model string, prompt service.Prompt) {
+func openAIToolStream(c *gin.Context, model string, prompt service.Prompt, includeUsage bool) {
 	stream := newChatStream(c, model)
 	defer stream.finish()
 	stopReason := "stop"
 	toolIndex := 0
 
-	_, err := runTaggedStream("chat/completions", model, prompt, func(ev TaggedStreamEvent) {
+	_, usage, err := runTaggedStream("chat/completions", model, prompt, func(ev TaggedStreamEvent) {
 		switch ev.Type {
 		case EventMessageStart:
 			stream.send(gin.H{"role": "assistant", "content": ""}, nil)
@@ -310,6 +339,5 @@ func openAIToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	if err != nil {
 		stream.send(gin.H{"content": "\n[错误] " + err.Error()}, nil)
 	}
-	stream.send(gin.H{}, stopReason)
-	stream.done()
+	stream.complete(stopReason, usage, includeUsage)
 }

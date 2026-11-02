@@ -51,14 +51,16 @@ func clientFor(acct *repository.Account, proxy string) *accountClient {
 }
 
 // pickAPIAccount 轮询可用账号。
-func pickAPIAccount() *repository.Account {
+func pickAPIAccount(model string) *repository.Account {
 	accounts := repository.LoadAccounts()
 	usable := make([]repository.Account, 0, len(accounts))
 	active := map[string]bool{}
 	for i := range accounts {
 		if AccountUsable(&accounts[i]) {
-			usable = append(usable, accounts[i])
 			active[accounts[i].Email] = true
+			if AccountSupportsModel(&accounts[i], model) {
+				usable = append(usable, accounts[i])
+			}
 		}
 	}
 	apiIndexLock.Lock()
@@ -111,9 +113,9 @@ func (Dispatcher) completeStateless(reqModel string, prompt Prompt, onText func(
 			res.StatusCode = 499
 			return res, &CompletionError{StatusCode: 499, Err: prompt.Context.Err()}
 		}
-		acct := pickAPIAccount()
+		acct := pickAPIAccount(reqModel)
 		if acct == nil {
-			return res, fmt.Errorf("号池中没有可用账号")
+			return res, fmt.Errorf("没有可使用模型 %s 的账号，请刷新账号模型记录", reqModel)
 		}
 		email := acct.Email
 		res.Account = email
@@ -179,8 +181,8 @@ func (Dispatcher) completeStateless(reqModel string, prompt Prompt, onText func(
 		}
 
 		prompt.Text = promptText
-		code, err := client.SendMessage(convID, model, prompt, attachments, files, wrappedOnText)
-		res.StatusCode = code
+		code, usage, err := client.SendMessage(email, convID, model, prompt, attachments, files, wrappedOnText)
+		res.StatusCode, res.Usage = code, usage
 		if code == 429 {
 			lease.ready = false
 		}

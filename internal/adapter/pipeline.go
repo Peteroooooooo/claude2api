@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"claude2api/internal/config"
 	"claude2api/internal/repository"
 	"claude2api/internal/service"
+	"claude2api/internal/utils"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -23,8 +25,6 @@ const (
 	MaxAPIBodyBytes = 20 << 20
 	defaultModel    = "claude-sonnet-4-6"
 )
-
-var supportedModels = []string{defaultModel, "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"}
 
 type Message struct {
 	Role       string
@@ -121,7 +121,7 @@ func sanitizeSystemPrompt(text string) string {
 	return strings.TrimSpace(text)
 }
 
-func runAndCollect(endpoint, model string, stream bool, prompt service.Prompt, emit func(string)) (string, error) {
+func runAndCollect(endpoint, model string, stream bool, prompt service.Prompt, emit func(string)) (string, repository.TextUsage, error) {
 	start := time.Now()
 	firstTokenMs := int64(0)
 	firstSeen := false
@@ -145,12 +145,12 @@ func runAndCollect(endpoint, model string, stream bool, prompt service.Prompt, e
 	})
 	write(filter.push("", true))
 	text := output.String()
-	logCompletion(endpoint, model, stream, prompt, text, res, err, start, firstTokenMs)
-	return text, err
+	usage := logCompletion(endpoint, model, stream, prompt, text, res, err, start, firstTokenMs)
+	return text, usage, err
 }
 
-func runNonStream(c *gin.Context, endpoint, model string, prompt service.Prompt) (string, bool) {
-	text, err := runAndCollect(endpoint, model, false, prompt, nil)
+func runNonStream(c *gin.Context, endpoint, model string, prompt service.Prompt) (string, repository.TextUsage, bool) {
+	text, usage, err := runAndCollect(endpoint, model, false, prompt, nil)
 	if err != nil {
 		code := http.StatusBadGateway
 		var upstream *service.CompletionError
@@ -159,31 +159,44 @@ func runNonStream(c *gin.Context, endpoint, model string, prompt service.Prompt)
 		}
 		apiError(c, code, err.Error())
 	}
-	return text, err == nil
+	return text, usage, err == nil
 }
 
-func logCompletion(endpoint, model string, stream bool, prompt service.Prompt, output string, res service.CompletionResult, err error, start time.Time, firstTokenMs int64) {
+func logCompletion(endpoint, model string, stream bool, prompt service.Prompt, output string, res service.CompletionResult, err error, start time.Time, firstTokenMs int64) repository.TextUsage {
 	durationMs := time.Since(start).Milliseconds()
-	outputTokens := tokenCount(output)
+	record := repository.UsageRecord{Account: res.Account, Model: model}
+	if res.Usage != nil {
+		record = *res.Usage
+	}
+	record.CreatedAt, record.Endpoint = start.UTC(), endpoint
+	// 会话复用的 replay 不访问上游，没有用量记录，但请求本身成功。
+	record.Success = err == nil && (res.Usage == nil || res.Usage.Success)
+	record.DurationMs, record.FirstTokenMs = durationMs, firstTokenMs
+	if saveErr := repository.InsertUsage(record); saveErr != nil {
+		slog.Error("[用量统计] 保存调用用量失败", "account", res.Account, "err", saveErr)
+	}
 	log := repository.APILog{
 		Endpoint: endpoint, Model: model, Account: res.Account, Stream: stream,
-		Success: err == nil, StatusCode: res.StatusCode,
-		InputTokens: tokenCount(prompt.Text), OutputTokens: outputTokens,
+		Success: record.Success, StatusCode: res.StatusCode,
+		InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, ThinkingTokens: &record.ThinkingTokens,
 		DurationMs: durationMs, FirstTokenMs: firstTokenMs,
 		SessionID: res.SessionID, ConversationID: res.ConversationID, ParentUUID: res.ParentUUID, MessageUUID: res.MessageUUID,
 		SessionAction: res.Action, UpstreamInputBytes: res.InputBytes, SwitchReason: res.SwitchReason,
 		UpstreamModel: res.UpstreamModel, ThinkingMode: res.ThinkingMode, Effort: res.Effort,
 	}
 	if config.Get().DetailedAPILog {
-		log.Request, log.Response = prompt.RawRequest, output
+		request, logErr := utils.RequestLog(prompt.RawRequest)
+		if logErr != nil {
+			slog.Error("[调用日志] 请求脱敏失败", "err", logErr)
+		}
+		log.Request, log.Response = request, utils.RedactMedia(output).(string)
 	}
 	if err != nil {
-		log.Error = err.Error()
+		log.Error = utils.RedactMedia(err.Error()).(string)
 	}
 	repository.InsertAPILog(log)
+	return record.TextUsage
 }
-
-func tokenCount(s string) int { return len(s) / 4 }
 
 type outputFilter struct {
 	stop              []string

@@ -102,7 +102,7 @@ func setupSessionTest(t *testing.T) *fakeWeb {
 		t.Fatal(err)
 	}
 	for _, email := range []string{"a@example.test", "b@example.test"} {
-		if err := repository.UpsertAccount(&repository.Account{Email: email, OrgUUID: "org-test", Cookies: map[string]string{"sessionKey": "test"}, Status: "active"}); err != nil {
+		if err := repository.UpsertAccount(&repository.Account{Email: email, OrgUUID: "org-test", Cookies: map[string]string{"sessionKey": "test"}, Status: "active", SubscriptionPlan: "claude_pro", Models: []repository.AccountModel{{ID: "claude-sonnet-5-5", Thinking: true}}}); err != nil {
 			t.Fatal(err)
 		}
 	}

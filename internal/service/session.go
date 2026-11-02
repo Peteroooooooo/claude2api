@@ -131,11 +131,11 @@ func incrementalPrompt(prompt Prompt, start int) Prompt {
 	return prompt
 }
 
-func pickSessionAccount(model string, excluded map[string]bool) *repository.Account {
+func pickSessionAccount(model, reqModel string, excluded map[string]bool) *repository.Account {
 	accounts := repository.LoadAccounts()
 	usable := make([]repository.Account, 0, len(accounts))
 	for _, account := range accounts {
-		if !AccountUsable(&account) || excluded[account.Email] {
+		if !AccountUsable(&account) || excluded[account.Email] || !AccountSupportsModel(&account, reqModel) {
 			continue
 		}
 		if repository.GetAccountCooldown(account.Email, model).Until.After(time.Now()) {
@@ -239,6 +239,9 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 	think := mode == "extended"
 	excluded := map[string]bool{}
 	account := AccountByEmail(session.Account)
+	if account != nil && !AccountSupportsModel(account, reqModel) {
+		account = nil
+	}
 	if account != nil {
 		cooldown := repository.GetAccountCooldown(account.Email, model)
 		if cooldown.Until.After(time.Now()) {
@@ -260,10 +263,10 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 	rateRetried := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if account == nil {
-			account = pickSessionAccount(model, excluded)
+			account = pickSessionAccount(model, reqModel, excluded)
 		}
 		if account == nil {
-			return fail(429, errors.New("号池没有可用账号（账号失效或额度冷却中）"))
+			return fail(429, fmt.Errorf("没有可使用模型 %s 的账号（账号失效、额度冷却中或套餐不支持）", reqModel))
 		}
 		res.Account = account.Email
 		if session.Account != account.Email {
@@ -378,13 +381,14 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 		var persistErr error
 		outgoing.OnMessageID = func(id string) { turn.MessageUUID = id; persistErr = repository.SaveChatTurn(&turn) }
 		var output strings.Builder
-		code, sendErr := client.SendMessage(session.ConversationID, model, outgoing, attachments, files, func(text string) {
+		code, usage, sendErr := client.SendMessage(account.Email, session.ConversationID, model, outgoing, attachments, files, func(text string) {
 			output.WriteString(text)
 			if onText != nil {
 				onText(text)
 			}
 		})
 		lease.Unlock()
+		res.Usage = usage
 		res.MessageUUID = turn.MessageUUID
 		if sendErr != nil && prompt.Context != nil && prompt.Context.Err() != nil {
 			turn.Status, turn.Response, turn.Error, turn.StatusCode = "interrupted", output.String(), prompt.Context.Err().Error(), 499

@@ -168,13 +168,13 @@ func responseObject(id, model, status, text string, created int64) gin.H {
 }
 
 func responsesNonStream(c *gin.Context, model string, prompt service.Prompt) {
-	text, ok := runNonStream(c, "responses", model, prompt)
+	text, usage, ok := runNonStream(c, "responses", model, prompt)
 	if !ok {
 		return
 	}
 	text = stripThinkingTags(text)
 	out := responseObject("resp_"+shortID(), model, "completed", text, time.Now().Unix())
-	out["usage"] = gin.H{"input_tokens": tokenCount(prompt.Text), "output_tokens": tokenCount(text), "total_tokens": tokenCount(prompt.Text) + tokenCount(text)}
+	out["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
 	c.JSON(http.StatusOK, out)
 }
 
@@ -207,7 +207,7 @@ func responsesStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream.emit("response.output_item.added", gin.H{"output_index": 0, "item": item})
 	stream.emit("response.content_part.added", gin.H{"item_id": item["id"], "output_index": 0, "content_index": 0, "part": gin.H{"type": "output_text", "text": "", "annotations": []any{}}})
 
-	text, err := runAndCollect("responses", model, true, prompt, func(text string) {
+	text, usage, err := runAndCollect("responses", model, true, prompt, func(text string) {
 		text = stripThinkingTags(text)
 		stream.emit("response.output_text.delta", gin.H{"item_id": item["id"], "output_index": 0, "content_index": 0, "delta": text})
 	})
@@ -225,7 +225,7 @@ func responsesStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream.emit("response.output_item.done", gin.H{"output_index": 0, "item": doneItem})
 	completed := responseObject(id, model, "completed", text, created)
 	completed["output"] = []gin.H{doneItem}
-	completed["usage"] = gin.H{"input_tokens": tokenCount(prompt.Text), "output_tokens": tokenCount(text), "total_tokens": tokenCount(prompt.Text) + tokenCount(text)}
+	completed["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
 	stream.emit("response.completed", gin.H{"response": completed})
 }
 
@@ -260,7 +260,7 @@ func functionCallItem(callID, name, arguments string) gin.H {
 
 // responsesToolNonStream 带 tools 的非流式：输出 function_call 或文本。
 func responsesToolNonStream(c *gin.Context, model string, prompt service.Prompt) {
-	raw, ok := runNonStream(c, "responses", model, prompt)
+	raw, usage, ok := runNonStream(c, "responses", model, prompt)
 	if !ok {
 		return
 	}
@@ -281,7 +281,7 @@ func responsesToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 			"output": output, "output_text": "",
 			"parallel_tool_calls": true, "tool_choice": "auto", "tools": []any{},
 			"text":  gin.H{"format": gin.H{"type": "text"}},
-			"usage": gin.H{"input_tokens": tokenCount(prompt.Text), "output_tokens": tokenCount(raw), "total_tokens": tokenCount(prompt.Text) + tokenCount(raw)},
+			"usage": gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens},
 		}
 		c.JSON(http.StatusOK, out)
 		return
@@ -289,7 +289,7 @@ func responsesToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 
 	text := formatOpenAITaggedAnswer(parsed)
 	out := responseObject(id, model, "completed", text, created)
-	out["usage"] = gin.H{"input_tokens": tokenCount(prompt.Text), "output_tokens": tokenCount(text), "total_tokens": tokenCount(prompt.Text) + tokenCount(text)}
+	out["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
 	c.JSON(http.StatusOK, out)
 }
 
@@ -344,7 +344,7 @@ func responsesToolStream(c *gin.Context, model string, prompt service.Prompt) {
 		stream.emit("response.output_text.delta", gin.H{"item_id": textItemID, "output_index": outputIndex, "content_index": 0, "delta": s})
 	}
 
-	rawText, err := runTaggedStream("responses", model, prompt, func(ev TaggedStreamEvent) {
+	rawText, usage, err := runTaggedStream("responses", model, prompt, func(ev TaggedStreamEvent) {
 		switch ev.Type {
 		case EventBlockStart:
 			// Internal thinking is not exposed as Responses output_text.
@@ -382,6 +382,6 @@ func responsesToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	completed := responseObject(id, model, "completed", "", created)
 	completed["output"] = output
 	completed["output_text"] = textBuf.String()
-	completed["usage"] = gin.H{"input_tokens": tokenCount(prompt.Text), "output_tokens": tokenCount(rawText), "total_tokens": tokenCount(prompt.Text) + tokenCount(rawText)}
+	completed["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
 	stream.emit("response.completed", gin.H{"response": completed})
 }

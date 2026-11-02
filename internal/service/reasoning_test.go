@@ -102,7 +102,7 @@ data: {"type":"message_stop"}`, 1)
 			web := &fakeWeb{parents: map[string]string{"test-conversation": rootMessageUUID}, onComplete: func(nativeCall, int) (int, string) { return 200, stream }}
 			client := &ClaudeAI{orgUUID: "test-org", client: &fakeHTTP{web: web, account: "test-account"}, headers: map[string]string{}}
 			var out strings.Builder
-			status, err := client.SendMessage("test-conversation", "claude-sonnet-5-5", Prompt{Text: "question", ThinkingMode: tc.mode, ThinkingDisplay: tc.display, Effort: "max"}, nil, nil, func(text string) { out.WriteString(text) })
+			status, _, err := client.SendMessage("", "test-conversation", "claude-sonnet-5-5", Prompt{Text: "question", ThinkingMode: tc.mode, ThinkingDisplay: tc.display, Effort: "max"}, nil, nil, func(text string) { out.WriteString(text) })
 			if err != nil || status != 200 {
 				t.Fatalf("send failed: status=%d error=%v", status, err)
 			}

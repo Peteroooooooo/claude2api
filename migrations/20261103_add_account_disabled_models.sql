@@ -1,0 +1,3 @@
+BEGIN IMMEDIATE;
+ALTER TABLE accounts ADD COLUMN disabled_models TEXT;
+COMMIT;

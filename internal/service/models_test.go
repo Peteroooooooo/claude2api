@@ -55,3 +55,18 @@ func TestUserInfoPrefersChatOrganization(t *testing.T) {
 		t.Fatalf("应选择聊天组织，实际 %+v", info)
 	}
 }
+
+func TestDisabledModelsExcludedFromScheduling(t *testing.T) {
+	stored := &repository.Account{SubscriptionPlan: "claude_pro", Models: []repository.AccountModel{
+		{ID: "claude-opus-5-5", Thinking: true}, {ID: "claude-sonnet-5-5", Thinking: true},
+	}, DisabledModels: []string{"claude-opus-5-5"}}
+	if AccountSupportsModel(stored, "claude-opus-5-5") || AccountSupportsModel(stored, "claude-opus-5-5-thinking") {
+		t.Fatal("停用的模型及其 -thinking 版本不应被调度")
+	}
+	if !AccountSupportsModel(stored, "claude-sonnet-5-5-thinking") {
+		t.Fatal("未停用的模型应可用")
+	}
+	if len(PlanModels(stored)) != 2 || len(AccountModels(stored)) != 1 {
+		t.Fatal("PlanModels 应保留完整目录，AccountModels 应去掉停用项")
+	}
+}

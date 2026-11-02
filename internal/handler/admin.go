@@ -136,6 +136,24 @@ func AdminRefreshAccount(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"account": service.PublicAccountView(account)})
 }
 
+// AdminSetAccountModels 保存账号的手动停用模型列表。
+func AdminSetAccountModels(c *gin.Context) {
+	var body struct {
+		Email    string   `json:"email"`
+		Disabled []string `json:"disabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
+		return
+	}
+	account, err := service.SetDisabledModels(strings.TrimSpace(body.Email), body.Disabled)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"account": service.PublicAccountView(account)})
+}
+
 func AdminGetConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"config": config.Get()})
 }

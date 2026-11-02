@@ -30,6 +30,7 @@ func NewMainEngine() *gin.Engine {
 	admin.GET("/accounts/export", handler.AdminExportAccounts)
 	admin.POST("/accounts/import", handler.AdminImportAccounts)
 	admin.POST("/accounts/refresh", handler.AdminRefreshAccount)
+	admin.POST("/accounts/models", handler.AdminSetAccountModels)
 	admin.GET("/config", handler.AdminGetConfig)
 	admin.POST("/config", handler.AdminUpdateConfig)
 	admin.POST("/delete", handler.AdminDeleteAccount)

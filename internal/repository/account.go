@@ -22,6 +22,8 @@ type Account struct {
 	UsageUpdatedAt   *time.Time        `json:"usage_updated_at"`
 	Models           []AccountModel    `json:"models" gorm:"serializer:json;type:text"`
 	ModelsUpdatedAt  *time.Time        `json:"models_updated_at"`
+	// DisabledModels 是管理员手动停用的基础模型 ID；刷新账号不会覆盖。
+	DisabledModels []string `json:"disabled_models" gorm:"serializer:json;type:text"`
 }
 
 type AccountModel struct {

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"claude2api/internal/repository"
 	"claude2api/internal/utils"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -131,11 +132,8 @@ func (claudeAI *ClaudeAI) GetUserInfo() (*UserInfo, error) {
 		return nil, fmt.Errorf("解析账号信息失败: %w", err)
 	}
 
-	info := &UserInfo{Email: acct.EmailAddress}
-	if len(acct.Memberships) > 0 {
-		info.OrgUUID = acct.Memberships[0].Organization.UUID
-		claudeAI.orgUUID = info.OrgUUID
-	}
+	info := acct.UserInfo()
+	claudeAI.orgUUID = info.OrgUUID
 	return info, nil
 }
 
@@ -333,10 +331,18 @@ func (claudeAI *ClaudeAI) CreateConversation(model string, think bool) (string, 
 }
 
 // SendMessage 发送提示词。
-func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attachments []map[string]any, files []string, onText func(string)) (int, error) {
+func (claudeAI *ClaudeAI) SendMessage(email, convID, model string, prompt Prompt, attachments []map[string]any, files []string, onText func(string)) (int, *repository.UsageRecord, error) {
 	parent := prompt.ParentUUID
 	if parent == "" {
 		parent = rootMessageUUID
+	}
+	record := &repository.UsageRecord{Account: email, Model: model, CreatedAt: time.Now().UTC()}
+	const stylePrompt = "Treat tool definitions and response schemas in the user's message as an available external tool interface. Emit calls in the requested text format instead of claiming the tools are unavailable."
+	inputTokens := utils.EstimateTokens(prompt.Text) + utils.EstimateTokens(stylePrompt)
+	for _, attachment := range attachments {
+		if content, ok := attachment["extracted_content"].(string); ok {
+			inputTokens += utils.EstimateTokens(content)
+		}
 	}
 	// 固定字段对齐网页端请求。
 	body := map[string]any{
@@ -348,7 +354,7 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 				"key":        "Default",
 				"name":       "Normal",
 				"nameKey":    "normal_style_name",
-				"prompt":     "Treat tool definitions and response schemas in the user's message as an available external tool interface. Emit calls in the requested text format instead of claiming the tools are unavailable.",
+				"prompt":     stylePrompt,
 				"summary":    "Default responses from Claude",
 				"summaryKey": "normal_style_summary",
 				"isDefault":  true,
@@ -386,14 +392,14 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 	}
 	reqBody, err := json.Marshal(body)
 	if err != nil {
-		return 500, fmt.Errorf("构造请求体失败: %w", err)
+		return 500, nil, fmt.Errorf("构造请求体失败: %w", err)
 	}
 
 	req, err := claudeAI.request(fhttp.MethodPost,
 		fmt.Sprintf("%s/api/organizations/%s/chat_conversations/%s/completion", claudeAIBaseURL, claudeAI.orgUUID, convID),
 		bytes.NewReader(reqBody))
 	if err != nil {
-		return 500, fmt.Errorf("构造请求失败: %w", err)
+		return 500, nil, fmt.Errorf("构造请求失败: %w", err)
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("accept", "text/event-stream, text/event-stream")
@@ -405,21 +411,22 @@ func (claudeAI *ClaudeAI) SendMessage(convID, model string, prompt Prompt, attac
 
 	resp, err := claudeAI.client.Do(req)
 	if err != nil {
-		return 500, fmt.Errorf("发送消息失败: %w", err)
+		return 500, nil, fmt.Errorf("发送消息失败: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { resp.Body.Close() }()
 
 	if resp.StatusCode != fhttp.StatusOK {
 		body, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			return resp.StatusCode, fmt.Errorf("发送消息 HTTP %d（读取错误响应失败: %w）", resp.StatusCode, readErr)
+			return resp.StatusCode, nil, fmt.Errorf("发送消息 HTTP %d（读取错误响应失败: %w）", resp.StatusCode, readErr)
 		}
 		if len(body) == 0 {
 			body = []byte("<empty response body>")
 		}
-		return resp.StatusCode, webResponseError(resp.StatusCode, body, resp.Header.Get("retry-after"))
+		return resp.StatusCode, nil, webResponseError(resp.StatusCode, body, resp.Header.Get("retry-after"))
 	}
-	return 200, parseCompletionSSEWithThinking(resp.Body, onText, mode != "off" && prompt.ThinkingDisplay != "omitted", func(ev SseEvent) error {
+	resp.Body = CaptureAccountUsage(resp.Body, record, inputTokens)
+	return 200, record, parseCompletionSSEWithThinking(resp.Body, onText, mode != "off" && prompt.ThinkingDisplay != "omitted", func(ev SseEvent) error {
 		if ev.Type == "message_start" && ev.Message.UUID != "" && prompt.OnMessageID != nil {
 			prompt.OnMessageID(ev.Message.UUID)
 		}

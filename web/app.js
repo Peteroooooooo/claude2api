@@ -7,6 +7,39 @@ function esc(s) {
   );
 }
 
+function usageWindowText(account, key) {
+  const window = account.usage?.windows[key];
+  if (!window) return "暂无记录";
+  const percent = new Intl.NumberFormat("zh-CN", {
+    style: "percent",
+    maximumFractionDigits: 1,
+  }).format(window.utilization);
+  const reset = new Date(window.resets_at * 1000);
+  const time = reset.toLocaleString("zh-CN", {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+  return `已用 ${percent}\n${time} 重置${Date.now() >= reset.getTime() ? "\n已到重置时间，待更新" : ""}`;
+}
+
+function accountPlanText(plan) {
+  if (plan === "") return "未查询";
+  return plan === "claude_free" ? "Free" : plan;
+}
+
+function renderAccountUsage(account, key) {
+  const window = account.usage?.windows[key];
+  if (!window) return '<span class="account-usage-empty">暂无记录</span>';
+  const percent = new Intl.NumberFormat("zh-CN", { style: "percent", maximumFractionDigits: 1 }).format(window.utilization);
+  const reset = new Date(window.resets_at * 1000);
+  const pending = Date.now() >= reset.getTime();
+  const tone = pending ? "pending" : window.utilization >= 1 ? "full" : window.utilization >= 0.8 ? "high" : "normal";
+  const time = reset.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+  return `<div class="account-usage ${tone}">
+    <div class="account-usage-head"><strong>${esc(percent)}</strong><time datetime="${reset.toISOString()}" title="${esc(`${time} 重置${pending ? "，已到重置时间，等待新对话更新用量" : ""}`)}">${pending ? "待更新" : `${esc(time)}重置`}</time></div>
+    <progress max="1" value="${window.utilization}" aria-label="${key === "5h" ? "5 小时" : "7 天"}已用 ${esc(percent)}${pending ? "，已到重置时间，待更新" : ""}"></progress>
+  </div>`;
+}
+
 const AUTH_TOKEN_KEY = "claude2api_credential";
 const AUTH_ROLE_KEY = "claude2api_role";
 let authToken = localStorage.getItem(AUTH_TOKEN_KEY) || "";
@@ -25,9 +58,18 @@ function clearAuth() {
   localStorage.removeItem(AUTH_ROLE_KEY);
 }
 
-function initAdmin(initialPage = "accounts", currentRole = "admin") {
+function initAdmin(initialPage = "overview", currentRole = "admin") {
   const adminRoot = document.querySelector(".view-admin");
   const $ = (sel) => adminRoot.querySelector(sel);
+
+  for (const select of adminRoot.querySelectorAll("select")) {
+    if (!select.tomselect) new TomSelect(select, {
+      controlInput: null,
+      copyClassesToDropdown: false,
+      onDelete: () => false,
+      onInitialize() { this.control.setAttribute("aria-label", select.getAttribute("aria-label")); },
+    });
+  }
 
   let ACCOUNTS = [];
 
@@ -225,12 +267,12 @@ function renderTable() {
   const rows = filteredAccounts();
 
   if (!ACCOUNTS.length) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">暂无账号</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="empty">暂无账号</td></tr>`;
     $("#pager").innerHTML = "";
     return;
   }
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="7" class="empty">没有符合条件的账号</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="empty">没有符合条件的账号</td></tr>`;
     $("#pager").innerHTML = "";
     return;
   }
@@ -245,6 +287,9 @@ function renderTable() {
       <td>${start + i + 1}</td>
       <td class="mono">${esc(a.email)}</td>
       <td>${statusBadge(a.status)}</td>
+      <td><span class="account-plan" title="${esc(a.subscription_plan)}">${esc(accountPlanText(a.subscription_plan))}</span></td>
+      <td class="account-usage-cell" title="${esc(a.usage_updated_at ? `记录于 ${fmtTime(a.usage_updated_at)}` : "")}">${renderAccountUsage(a, "5h")}</td>
+      <td class="account-usage-cell" title="${esc(a.usage_updated_at ? `记录于 ${fmtTime(a.usage_updated_at)}` : "")}">${renderAccountUsage(a, "7d")}</td>
       <td class="mono">${esc(fmtTime(a.created_at) || "—")}</td>
       <td>${esc(fmtSurvived(a.created_at))}</td>
       <td class="mono">${esc(fmtTime(a.updated_at) || "—")}</td>
@@ -330,10 +375,10 @@ async function loadAccountModels() {
       ? names
           .map(
             (name) =>
-              `<button type="button" class="model-pill" data-model="${esc(name)}">${esc(name)}</button>`,
+              `<button type="button" class="model-pill model-icon-label" data-model="${esc(name)}">${esc(name)}</button>`,
           )
           .join("")
-      : '<span class="model-empty">暂无可用模型</span>';
+      : '<span class="model-empty">暂无套餐可用模型，请先刷新账号</span>';
   } catch (e) {
     box.innerHTML = `<span class="model-error">加载失败：${esc(e.message)}</span>`;
   }
@@ -488,7 +533,7 @@ async function deleteExpired() {
   }
 }
 
-function openDetail(email) {
+async function openDetail(email) {
   const a = ACCOUNTS.find((x) => x.email === email);
   if (!a) return;
   const rows = [
@@ -500,15 +545,29 @@ function openDetail(email) {
       ] || a.status,
     ],
     ["组织 UUID", a.org_uuid || "—"],
+    ["套餐", accountPlanText(a.subscription_plan)],
+    ["套餐可用模型", a.models?.length ? a.models.map((model) => model.id).join("、") : "请刷新账号"],
+    ["模型记录时间", a.models_updated_at ? fmtTime(a.models_updated_at) : "暂无记录"],
+    ["5 小时用量", usageWindowText(a, "5h")],
+    ["7 天用量", usageWindowText(a, "7d")],
+    ["用量记录时间", a.usage_updated_at ? fmtTime(a.usage_updated_at) : "暂无记录"],
     ["创建时间", fmtTime(a.created_at) || "—"],
     ["已存活", fmtSurvived(a.created_at)],
     ["更新时间", fmtTime(a.updated_at) || "—"],
   ];
+  try {
+    const query = new URLSearchParams({ account: email, days: 0, group: "model", offset: 0, limit: 10, timezone_offset: new Date().getTimezoneOffset() });
+    const { usage } = await api(`/api/usage?${query}`);
+    const stats = usage.summary;
+    rows.push(["累计对话", stats.requests.toLocaleString("zh-CN")], ["输入 Token（估算）", stats.input_tokens.toLocaleString("zh-CN")], ["回答与工具（估算）", stats.output_tokens.toLocaleString("zh-CN")], ["可见思考（估算）", stats.thinking_tokens.toLocaleString("zh-CN")], ["缓存用量", "未提供"]);
+  } catch (error) {
+    rows.push(["累计用量", `读取失败：${error.message}`]);
+  }
 
   const info = rows
     .map(
       ([k, v]) =>
-        `<div class="dl-row"><span class="dl-key">${esc(k)}</span><span class="dl-val mono">${esc(v)}</span></div>`,
+        `<div class="dl-row"><span class="dl-key">${esc(k)}</span><span class="dl-val mono usage-window${k === "套餐可用模型" ? " model-list" : ""}">${k === "套餐可用模型" && a.models?.length ? a.models.map((model) => `<span class="model-pill model-icon-label">${esc(model.id)}</span>`).join("") : esc(v)}</span></div>`,
     )
     .join("");
 
@@ -528,7 +587,9 @@ async function loadConfig() {
     for (const k of CONFIG_FIELDS) {
       const el = $("#cfg-" + k);
       if (!el) continue;
-      el.value = String(c[k] ?? CONFIG_DEFAULTS[k] ?? "");
+      const value = String(c[k] ?? CONFIG_DEFAULTS[k] ?? "");
+      if (el.tagName === "SELECT") el.tomselect.setValue(value, true);
+      else el.value = value;
     }
   } catch (e) {
     showMsg("加载配置失败: " + e.message, "err");
@@ -607,16 +668,42 @@ function renderChat() {
 }
 
 async function loadChatModels() {
+  const select = $("#test-model");
   try {
-    const select = $("#test-model");
-    const models = await fetchModels();
-    select.innerHTML = models.length
-      ? models
-          .map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`)
-          .join("")
-      : '<option value="">暂无可用模型</option>';
+    if (!select.tomselect) new TomSelect(select, {
+      maxItems: 1,
+      valueField: "id",
+      labelField: "id",
+      searchField: "id",
+      placeholder: "选择模型",
+      onInitialize() { this.control_input.setAttribute("aria-label", "选择模型"); },
+      render: {
+        item: (model, escape) => `<div class="model-icon-label" title="${escape(model.id)}"><span>${escape(model.id)}</span></div>`,
+        option: (model, escape) => `<div class="model-icon-label" title="${escape(model.id)}"><span>${escape(model.id)}</span></div>`,
+        no_results: () => '<div class="no-results">没有匹配的模型</div>',
+      },
+    });
+    const picker = select.tomselect;
+    const previous = picker.getValue();
+    picker.disable();
+    const names = modelNames(await fetchModels());
+    picker.clear();
+    picker.clearOptions();
+    picker.addOptions(names.map((id) => ({ id })));
+    picker.settings.placeholder = names.length ? "选择模型" : "暂无可用模型";
+    if (names.length) {
+      picker.setValue(names.includes(previous) ? previous : names[0]);
+      picker.enable();
+    }
+    picker.inputState();
   } catch (e) {
-    $("#test-model").innerHTML = '<option value="">加载失败</option>';
+    select.value = "";
+    select.placeholder = "加载失败";
+    if (select.tomselect) {
+      select.tomselect.clear();
+      select.tomselect.settings.placeholder = "加载失败";
+      select.tomselect.inputState();
+    }
     showMsg("加载模型失败: " + e.message, "err");
   }
 }
@@ -640,8 +727,9 @@ async function readChatImages(files) {
 }
 
 async function sendTestChat() {
-	if ($("#btn-test-send").disabled) return;
-  const model = $("#test-model").value.trim();
+  if ($("#btn-test-send").disabled) return;
+  const model = $("#test-model").value;
+  if (!model) return showMsg("请先选择可用模型", "err");
   const key = authToken;
   const message = $("#test-message").value.trim();
   if (!message) {
@@ -725,7 +813,9 @@ function switchPage(name) {
     .forEach((p) => p.classList.toggle("hidden", p.id !== "page-" + name));
   if (name === "api") $("#api-base").textContent = window.location.origin;
   if (name === "chat") loadChatModels();
-  if (name === "accounts") loadAccountModels();
+  if (name === "accounts") refreshAccountsPage();
+  if (name === "overview") overview.load();
+  if (name === "pool") pool.load();
   if (name === "system") loadConfig();
   if (name === "keys") loadKeys();
   if (name === "logs") loadLogs();
@@ -794,7 +884,10 @@ let logsPage = 1;
 let logsPageSize = 10;
 let logsTotal = 0;
 const fmtSeconds = (ms) => ms ? `${(ms / 1000).toFixed(2)} s` : "—";
-const fmtTPS = (log) => log.session_action === "replay" ? "复用" : log.duration_ms > 0 && log.output_tokens > 0 ? `≈${Number(log.tps || 0).toFixed(1)} TPS` : "—";
+const logNumbers = new Intl.NumberFormat("zh-CN");
+const logOutputTokens = (log) => (log.output_tokens || 0) + (log.thinking_tokens ?? 0);
+const fmtTPS = (log) => log.session_action === "replay" ? "复用" : log.duration_ms > 0 && logOutputTokens(log) > 0 ? `≈${Number(log.tps || 0).toFixed(1)}` : "—";
+const sessionLabels = {new:"新建",continue:"续聊",rebuild:"重建",switch:"换号",replay:"结果复用",interrupted:"中断"};
 
 function renderLogSummary(stats) {
   const number = (value) => Number(value || 0).toLocaleString("zh-CN");
@@ -810,7 +903,7 @@ function renderLogSummary(stats) {
     {key:"calls", label:"调用", value:stats?.calls, foot:"全部保留日志", icon:'<path d="M4 5h16v14H4zM8 9h8M8 13h5"/>'},
     {key:"success", label:"成功", value:stats?.success, foot:`成功率 ${percent(stats?.success || 0, calls)}`, ratio:calls ? stats.success / calls : 0, icon:'<path d="m5 12 4 4 10-10"/>'},
     {key:"failed", label:"失败", value:stats?.failed, foot:`失败率 ${percent(stats?.failed || 0, calls)}`, ratio:calls ? stats.failed / calls : 0, icon:'<path d="m6 6 12 12M18 6 6 18"/>'},
-    {key:"tokens", label:"总 Token", value:stats?.total_tokens, foot:"输入 + 输出", compact:true, icon:'<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M9 9h6M12 9v6"/>'},
+    {key:"tokens", label:"总 Token", value:stats?.total_tokens, foot:"输入 + 输出（含可见思考）", compact:true, icon:'<rect x="5" y="5" width="14" height="14" rx="3"/><path d="M9 9h6M12 9v6"/>'},
     {key:"input", label:"输入 Token", value:stats?.input_tokens, foot:`占总量 ${percent(stats?.input_tokens || 0, totalTokens)}`, compact:true, ratio:totalTokens ? stats.input_tokens / totalTokens : 0, icon:'<path d="M12 3v12m-4-4 4 4 4-4M5 17v4h14v-4"/>'},
     {key:"output", label:"输出 Token", value:stats?.output_tokens, foot:`占总量 ${percent(stats?.output_tokens || 0, totalTokens)}`, compact:true, ratio:totalTokens ? stats.output_tokens / totalTokens : 0, icon:'<path d="M12 16V4m-4 4 4-4 4 4M5 17v4h14v-4"/>'},
   ];
@@ -830,40 +923,43 @@ async function loadLogs() {
     const logs = data.logs || [];
     logsTotal = data.total || 0;
     renderLogSummary(data.stats);
-    const measuredLogs = logs.filter((l) => l.session_action !== "replay" && l.duration_ms > 0 && l.output_tokens > 0);
+    const measuredLogs = logs.filter((l) => l.session_action !== "replay" && l.duration_ms > 0 && logOutputTokens(l) > 0);
     const avgTPS = measuredLogs.length ? measuredLogs.reduce((n, l) => n + (l.tps || 0), 0) / measuredLogs.length : 0;
-    $("#logs-stats").innerHTML = `<span><small>本页平均 TPS</small><b>${measuredLogs.length ? "≈" + avgTPS.toFixed(1) : "—"}</b></span>`;
+    $("#logs-stats").textContent = `共 ${logNumbers.format(logsTotal)} 次调用 · 本页平均 TPS ${measuredLogs.length ? "≈" + avgTPS.toFixed(1) : "—"}`;
     if (!logs.length) {
-      body.innerHTML = `<tr><td colspan="9" class="empty">暂无调用日志</td></tr>`;
+      body.innerHTML = `<tr><td colspan="11" class="empty">暂无调用日志</td></tr>`;
       updateLogSelection();
       renderLogsPager();
       return;
     }
     body.innerHTML = logs
       .map((l) => {
-        const sessionLabel = ({new:"新建",continue:"续聊",rebuild:"重建",switch:"换号",replay:"结果复用",interrupted:"中断"})[l.session_action];
-        const status = l.success
-          ? `<span class="log-status ok"><i></i>成功</span>`
-          : `<span class="log-status err" title="${esc(l.error || "")}"><i></i>失败</span>`;
-        return `<tr data-log-id="${l.id}">
+        const sessionLabel = sessionLabels[l.session_action];
+        const output = logOutputTokens(l);
+        const hasUsage = l.success || l.input_tokens > 0 || output > 0;
+        const firstTone = l.first_token_ms === 0 ? "muted" : l.first_token_ms <= 3000 ? "ok" : l.first_token_ms <= 10000 ? "warn" : "err";
+        const durationTone = l.duration_ms === 0 ? "muted" : l.duration_ms <= 30000 ? "ok" : l.duration_ms <= 60000 ? "warn" : "err";
+        return `<tr data-log-id="${l.id}" class="${l.success ? "" : "log-failed"}">
         <td><input class="log-check" type="checkbox" value="${l.id}" aria-label="选择日志 ${l.id}"></td>
-        <td class="log-time"><b>${esc(fmtTime(l.created_at).split(" ")[1] || "—")}</b><span>${esc(fmtTime(l.created_at).split(" ")[0] || "")}</span></td>
-        <td class="log-request"><b>${esc(l.endpoint)} <em>${l.stream ? "流" : "非流"}</em>${sessionLabel ? ` <small class="log-session-badge">${esc(sessionLabel)}</small>` : ""}</b><span class="mono">${esc(l.model || "—")}</span></td>
+        <td class="log-time"><time datetime="${esc(l.created_at)}">${esc(fmtTime(l.created_at))}</time></td>
+        <td>${l.account ? `<button class="log-copy log-account" data-copy="${esc(l.account)}" title="${esc(l.account)} · 点击复制">${esc(l.account)}</button>` : '<span class="log-secondary">未分配</span>'}</td>
+        <td><button class="log-copy log-model" data-copy="${esc(l.model)}" title="${esc(l.model)} · 点击复制"><img src="/static/claude.svg" alt="" width="15" height="15"><span>${esc(l.model)}</span></button></td>
+        <td class="log-mode"><span class="${l.stream ? "is-stream" : ""}">${l.stream ? "流式" : "非流式"}</span>${sessionLabel ? `<small class="log-session-badge">${esc(sessionLabel)}</small>` : ""}</td>
         <td class="log-reasoning">${l.thinking_mode ? `<span>思考 <b class="${l.thinking_mode === "extended" ? "enabled" : ""}">${esc(l.thinking_mode === "extended" ? l.effort || "默认" : "关闭")}</b></span>${l.thinking_mode === "off" && l.effort ? `<span>强度 <b>${esc(l.effort)}</b></span>` : ""}` : "—"}</td>
-        <td class="log-account" title="${esc(l.account || "")}">${esc(l.account || "—")}</td>
-        <td>${status}<span class="log-code">HTTP ${l.status_code || "—"}</span></td>
-        <td class="log-token mono"><b>${l.input_tokens || 0}</b><i>→</i><b>${l.output_tokens || 0}</b></td>
-        <td class="log-performance"><b>${fmtSeconds(l.first_token_ms)}</b><span title="估算输出 Token ÷ 总耗时">${fmtTPS(l)} · ${fmtSeconds(l.duration_ms)}</span></td>
-        <td><button class="log-open act-log-detail" data-id="${l.id}" aria-label="查看调用 ${l.id}">查看<span>→</span></button></td>
+        <td class="log-tps" title="估算输出 Token ÷ 总耗时">${fmtTPS(l)}</td>
+        <td class="log-status-col"><span class="log-status ${l.success ? "ok" : "err"}">${l.success ? "成功" : "失败"}${l.status_code ? ` · ${l.status_code}` : ""}</span></td>
+        <td class="log-token">${hasUsage ? `<b>${logNumbers.format(l.input_tokens)}</b><i>/</i><b>${logNumbers.format(output)}</b>` : '<span class="log-secondary">—</span>'}</td>
+        <td class="log-performance"><span class="log-latency ${firstTone}"><small>首字</small><b>${fmtSeconds(l.first_token_ms)}</b></span><span class="log-latency ${durationTone}"><small>总计</small><b>${fmtSeconds(l.duration_ms)}</b></span></td>
+        <td class="log-details"><button class="log-open act-log-detail" data-id="${l.id}" aria-label="查看调用 ${l.id} 详情" title="${esc(l.error)}">${l.error ? `<span class="log-error-preview">${esc(l.error)}</span>` : "查看详情"}</button></td>
       </tr>`;
       })
       .join("");
     updateLogSelection();
     renderLogsPager();
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="9" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    $("#logs-stats").textContent = "";
     renderLogSummary();
-    $("#logs-stats").innerHTML = "";
+    body.innerHTML = `<tr><td colspan="11" class="empty">加载失败：${esc(e.message)}</td></tr>`;
     updateLogSelection();
   }
 }
@@ -872,6 +968,7 @@ function updateLogSelection() {
   const checks = [...document.querySelectorAll(".log-check")];
   const selected = checks.filter((el) => el.checked);
   $("#logs-check-all").checked = checks.length > 0 && selected.length === checks.length;
+  $("#logs-check-all").indeterminate = selected.length > 0 && selected.length < checks.length;
   $("#btn-logs-delete").disabled = selected.length === 0;
   $("#btn-logs-delete").textContent = selected.length ? `删除选中（${selected.length}）` : "删除选中";
 }
@@ -910,17 +1007,19 @@ async function showLogDetail(id) {
     $("#log-detail-title").innerHTML = `调用详情 <span>#${l.id}</span>`;
     $("#log-detail-body").innerHTML = `
       <div class="log-detail-meta">
-        ${logMeta("请求", l.endpoint, l.model || "—")}
+        <div class="log-meta-item"><small>请求</small><b>${esc(l.endpoint)}</b><span class="model-icon-label">${esc(l.model || "—")}</span></div>
         ${logMeta("账号", l.account || "—")}
 		${l.session_action ? logMeta("会话", ({new:"新建",continue:"续聊",rebuild:"重建",switch:"换号恢复",replay:"重复请求复用",interrupted:"中断"})[l.session_action] || l.session_action, `本轮上传 ${l.upstream_input_bytes || 0} 字节${l.switch_reason ? " · " + l.switch_reason : ""}`) : ""}
 		${l.upstream_model ? logMeta("上游模型", l.upstream_model, `thinking_mode=${l.thinking_mode || "默认"} · effort=${l.effort || "网页默认"}`) : ""}
         ${logMeta("结果", `${l.success ? "成功" : "失败"} · HTTP ${l.status_code || "—"}`, fmtTime(l.created_at))}
-        ${logMeta("性能", `${fmtSeconds(l.first_token_ms)} 首字`, `${fmtTPS(l)} · ${fmtSeconds(l.duration_ms)} 总耗时`)}
+        ${logMeta("性能", `${fmtSeconds(l.first_token_ms)} 首字`, `${fmtTPS(l)} TPS · ${fmtSeconds(l.duration_ms)} 总耗时`)}
+        ${logMeta("可见思考", l.thinking_tokens == null ? "未记录" : `${l.thinking_tokens} 估算 Token`)}
+        ${logMeta("用量来源", "可见文本估算", "缓存用量未提供")}
       </div>
       ${l.error ? `<div class="log-error-box"><b>请求错误</b><span>${esc(l.error)}</span></div>` : ""}
-	  ${l.conversation_id ? `<details class="log-tools"><summary>会话续聊详情</summary><pre>${esc(JSON.stringify({session_id:l.session_id,conversation_id:l.conversation_id,parent_uuid:l.parent_uuid,message_uuid:l.message_uuid},null,2))}</pre></details>` : ""}
-      <section class="log-detail-section"><div class="log-section-head"><div><small>REQUEST</small><h3>请求消息</h3></div><span>${l.input_tokens || 0} tokens</span></div>${renderLogRequest(l.request)}</section>
-      <section class="log-detail-section"><div class="log-section-head"><div><small>RESPONSE</small><h3>模型输出</h3></div><span>${l.output_tokens || 0} tokens</span></div>${l.response ? `<div class="log-response">${renderMarkdown(l.response)}</div>` : detailDisabled()}</section>`;
+      ${l.conversation_id ? `<details class="log-tools"><summary>会话续聊详情</summary><pre>${esc(JSON.stringify({session_id:l.session_id,conversation_id:l.conversation_id,parent_uuid:l.parent_uuid,message_uuid:l.message_uuid},null,2))}</pre></details>` : ""}
+      <section class="log-detail-section"><div class="log-section-head"><div><small>REQUEST</small><h3>请求消息</h3></div><span>${l.input_tokens || 0} 估算 Token</span></div>${renderLogRequest(l.request)}</section>
+      <section class="log-detail-section"><div class="log-section-head"><div><small>RESPONSE</small><h3>模型输出</h3></div><span>${l.output_tokens || 0} 估算 Token</span></div>${l.response ? `<div class="log-response">${renderMarkdown(l.response)}</div>` : detailDisabled()}</section>`;
     switchPage("log-detail");
     window.scrollTo(0, 0);
   } catch (e) {
@@ -977,7 +1076,7 @@ function renderLogContent(content) {
   return content.map((part) => {
     if (part.type === "text" || part.type === "input_text" || part.type === "output_text") return `<div class="log-message-text">${renderMarkdown(part.text || "")}</div>`;
     const url = part.image_url?.url || part.image_url || (part.type === "image" && part.source?.data ? `data:${part.source.media_type};base64,${part.source.data}` : "");
-    if (url && /^data:image\//.test(url)) return `<figure class="log-image"><img src="${esc(url)}" alt="请求图片"><figcaption>${esc(part.type)}</figcaption></figure>`;
+    if (url && /^data:image\//.test(url) && !url.includes("[媒体内容未保存")) return `<figure class="log-image"><img src="${esc(url)}" alt="请求图片"><figcaption>${esc(part.type)}</figcaption></figure>`;
     return `<div class="log-block"><span>${esc(part.type || "block")}</span><pre>${esc(JSON.stringify(part, null, 2))}</pre></div>`;
   }).join("");
 }
@@ -1028,7 +1127,7 @@ $("#nav").addEventListener("click", (e) => {
 $("#account-models").addEventListener("click", (e) => {
   const btn = e.target.closest(".model-pill");
   if (!btn) return;
-  const model = btn.dataset.model || btn.textContent.trim();
+  const model = btn.dataset.model;
   navigator.clipboard?.writeText(model).then(
     () => showMsg(`已复制模型：${model}`, "ok"),
     () => showMsg("复制失败，请手动选择", "err"),
@@ -1127,7 +1226,17 @@ $("#logs-pager").addEventListener("click", (e) => {
     loadLogs();
   }
 });
-$("#logs-body").addEventListener("click", (e) => {
+$("#logs-body").addEventListener("click", async (e) => {
+  const copy = e.target.closest("[data-copy]");
+  if (copy) {
+    try {
+      await navigator.clipboard.writeText(copy.dataset.copy);
+      showMsg("已复制", "ok");
+    } catch {
+      showMsg("复制失败，请手动选择", "err");
+    }
+    return;
+  }
   if (e.target.classList.contains("log-check")) updateLogSelection();
   const btn = e.target.closest(".act-log-detail");
   const row = e.target.closest("tr[data-log-id]");
@@ -1211,14 +1320,12 @@ $("#acc-body").addEventListener("click", (e) => {
   else if (e.target.classList.contains("act-del")) deleteOne(email);
 });
 
-initPool($("#page-pool"));
+const overview = initOverview($("#page-overview"), api, showMsg);
+const pool = initPool($("#page-pool"));
 if (currentRole !== "admin") {
   adminRoot
     .querySelectorAll('.nav-item:not([data-page="pool"])')
     .forEach((el) => el.classList.add("hidden"));
-} else {
-  refreshAccountsPage();
-  loadConfig();
 }
 switchPage(initialPage);
 }
@@ -1309,8 +1416,14 @@ function initPool(poolRoot) {
             <div class="meta">
               <span class="pool-email">${esc(a.email)}</span>
             </div>
+            <div class="pool-usage">
+              <div><span class="pool-usage-label">5 小时用量</span>${renderAccountUsage(a, "5h")}</div>
+              <div><span class="pool-usage-label">7 天用量</span>${renderAccountUsage(a, "7d")}</div>
+            </div>
+            ${a.usage_updated_at ? `<div class="meta">记录于 ${esc(new Date(a.usage_updated_at).toLocaleString("zh-CN", { hour12: false }))}</div>` : ""}
           </div>
           <div class="pool-card-foot">
+            <span class="account-plan" title="订阅套餐">${esc(accountPlanText(a.subscription_plan))}</span>
             <span class="enter">进入使用 ${iconArrow}</span>
           </div>
         </div>`;
@@ -1439,7 +1552,7 @@ function initPool(poolRoot) {
     render();
   });
 
-  load();
+  return { load };
 }
 
 function resolvePage() {
@@ -1447,7 +1560,7 @@ function resolvePage() {
   return {
     page: "admin",
     role: authRole,
-    initialPage: "pool",
+    initialPage: authRole === "admin" ? "overview" : "pool",
   };
 }
 
@@ -1462,7 +1575,7 @@ function boot() {
     );
 
   if (page === "admin")
-    document.title = "Claude2API · 号池选择";
+    document.title = role === "admin" ? "Claude2API · 数据概览" : "Claude2API · 号池选择";
   else if (page === "login") document.title = "登录 · Claude2API";
   else document.title = "Claude2API · 选择账号";
 
@@ -1470,4 +1583,78 @@ function boot() {
   else if (page === "login") initLogin();
 }
 
+async function loadAppVersion() {
+  const button = document.querySelector("#app-version");
+  const status = document.querySelector("#version-update-status");
+  const check = document.querySelector("#version-check-state");
+  check.textContent = "检查中…";
+  check.classList.remove("is-update");
+  try {
+    const response = await fetch("/api/version", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const version = await response.json();
+    document.querySelector("#app-version-text").textContent = version.version;
+    document.querySelector("#version-update-dot").classList.toggle("hidden", !version.update_available);
+    status.classList.toggle("hidden", !version.update_available);
+    status.textContent = version.update_available ? `有新版本 ${version.latest_version}` : "";
+    document.querySelector("#version-current").textContent = version.version;
+    document.querySelector("#version-latest").textContent = version.check_failed ? "暂不可用" : version.latest_version;
+    check.textContent = version.check_failed ? "检查失败" : version.update_available ? "有更新" : "未发现更新";
+    check.classList.toggle("is-update", version.update_available);
+    const detail = version.check_failed ? `当前 ${version.version}，暂时无法检查更新` : version.update_available ? `当前 ${version.version}，可更新至 ${version.latest_version}` : `当前 ${version.version}，未发现新版本`;
+    button.title = `${detail}，点击查看更新记录`;
+    button.setAttribute("aria-label", `查看版本更新记录，${detail}`);
+  } catch {
+    button.title = "版本信息暂时无法读取，点击查看更新记录";
+    button.setAttribute("aria-label", button.title);
+    document.querySelector("#app-version-text").textContent = "版本未知";
+    document.querySelector("#version-update-dot").classList.add("hidden");
+    document.querySelector("#version-current").textContent = "读取失败";
+    document.querySelector("#version-latest").textContent = "暂不可用";
+    check.textContent = "检查失败";
+    status.classList.add("hidden");
+  }
+}
+
+async function openVersionHistory() {
+  const dialog = document.querySelector("#version-dialog");
+  const history = document.querySelector("#version-history");
+  history.textContent = "正在读取更新记录…";
+  dialog.showModal();
+  loadAppVersion();
+  try {
+    const response = await fetch("/api/changelog", { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const releases = [];
+    let kind;
+    for (const token of marked.lexer(await response.text())) {
+      if (token.type === "heading" && token.depth === 2) {
+        const [version, date] = token.text.split(" · ");
+        releases.push({ version, date, changes: [] });
+      } else if (token.type === "heading" && token.depth === 3) {
+        kind = token.text;
+      } else if (token.type === "list") {
+        releases.at(-1).changes.push(...token.items.map((item) => ({ kind, text: item.text })));
+      }
+    }
+    history.innerHTML = releases.map((release) => `<section class="release-entry">
+      <div class="release-head"><h3>${esc(release.version)}</h3>${release.date ? `<time datetime="${esc(release.date)}">${esc(release.date)}</time>` : ""}</div>
+      <ul class="release-changes">${release.changes.map((change) => `<li><span class="change-tag" data-kind="${esc(change.kind)}">${esc(change.kind)}</span><span>${esc(change.text)}</span></li>`).join("")}</ul>
+    </section>`).join("");
+    history.scrollTop = 0;
+  } catch {
+    history.textContent = "更新记录暂时无法读取，请关闭后重试，或前往 GitHub 查看。";
+  }
+}
+
+document.querySelector("#app-version").addEventListener("click", openVersionHistory);
+document.querySelector("#version-close").addEventListener("click", () => document.querySelector("#version-dialog").close());
+document.querySelector("#version-dialog").addEventListener("click", (event) => {
+  if (event.target !== event.currentTarget) return;
+  const bounds = event.currentTarget.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) event.currentTarget.close();
+});
+
 boot();
+loadAppVersion();
+setInterval(() => { if (!document.hidden) loadAppVersion(); }, 60 * 60 * 1000);

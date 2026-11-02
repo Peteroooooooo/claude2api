@@ -34,7 +34,7 @@ func InitDB() error {
 	if sqlDB, err := conn.DB(); err == nil {
 		sqlDB.SetMaxOpenConns(1)
 	}
-	if err := conn.AutoMigrate(&Account{}, &APIKey{}, &APILog{}, &ChatSession{}, &ChatTurn{}, &AccountCooldown{}, &ChatConversation{}); err != nil {
+	if err := conn.AutoMigrate(&Account{}, &APIKey{}, &APILog{}, &UsageRecord{}, &ChatSession{}, &ChatTurn{}, &AccountCooldown{}, &ChatConversation{}); err != nil {
 		return fmt.Errorf("建表失败: %w", err)
 	}
 	db = conn

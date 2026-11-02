@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -64,6 +65,8 @@ type proxyCtx struct {
 	onMain         bool
 	mainOrig       string
 	ucOrig         string
+	usage          *repository.UsageRecord
+	inputTokens    int
 }
 
 type ctxKey struct{}
@@ -78,6 +81,12 @@ func buildReverseProxy() *httputil.ReverseProxy {
 		Director:       proxyDirector,
 		ModifyResponse: proxyModifyResponse,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if pc, ok := r.Context().Value(ctxKey{}).(*proxyCtx); ok && pc.usage != nil {
+				pc.usage.DurationMs = time.Since(pc.usage.CreatedAt).Milliseconds()
+				if saveErr := repository.InsertUsage(*pc.usage); saveErr != nil {
+					slog.Error("[用量统计] 保存失败请求用量失败", "err", saveErr)
+				}
+			}
 			if errors.Is(err, context.Canceled) || errors.Is(err, http.ErrAbortHandler) {
 				return
 			}
@@ -188,7 +197,17 @@ func proxyModifyResponse(resp *http.Response) error {
 
 	if isStream {
 		resp.Header.Set("Cache-Control", "no-cache")
+		if pc.usage != nil {
+			resp.Body = service.CaptureAccountUsage(resp.Body, pc.usage, pc.inputTokens)
+		}
 		return nil
+	}
+	if pc.usage != nil {
+		pc.usage.DurationMs = time.Since(pc.usage.CreatedAt).Milliseconds()
+		if err := repository.InsertUsage(*pc.usage); err != nil {
+			slog.Error("[用量统计] 保存非流式响应记录失败", "err", err)
+		}
+		pc.usage = nil
 	}
 
 	needRewrite := false
@@ -374,6 +393,37 @@ func ServeReverseProxy(w http.ResponseWriter, r *http.Request, onMain bool) {
 		onMain:         onMain,
 		mainOrig:       mainOrig,
 		ucOrig:         ucOrig,
+	}
+	if onMain && r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/organizations/") && strings.HasSuffix(r.URL.Path, "/completion") {
+		body, err := io.ReadAll(r.Body)
+		r.Body.Close()
+		if err != nil {
+			http.Error(w, "无法读取对话内容", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var message struct {
+			Prompt      string `json:"prompt"`
+			Model       string `json:"model"`
+			Attachments []struct {
+				Text string `json:"extracted_content"`
+			} `json:"attachments"`
+			Styles []struct {
+				Prompt string `json:"prompt"`
+			} `json:"personalized_styles"`
+		}
+		if err := json.Unmarshal(body, &message); err != nil {
+			http.Error(w, "对话内容格式错误", http.StatusBadRequest)
+			return
+		}
+		pc.inputTokens = utils.EstimateTokens(message.Prompt)
+		for _, attachment := range message.Attachments {
+			pc.inputTokens += utils.EstimateTokens(attachment.Text)
+		}
+		for _, style := range message.Styles {
+			pc.inputTokens += utils.EstimateTokens(style.Prompt)
+		}
+		pc.usage = &repository.UsageRecord{Account: email, Model: message.Model, Endpoint: "mirror", CreatedAt: time.Now().UTC()}
 	}
 	ctx := context.WithValue(r.Context(), ctxKey{}, pc)
 	defer func() {
@@ -596,7 +646,7 @@ func injectPoolBar(data []byte, email string) []byte {
 		`</div>`
 
 	css := `<style>` +
-		`#__pool_bar__.pb-card{position:fixed;right:14px;top:14px;z-index:2147483647;` +
+		`#__pool_bar__.pb-card{position:fixed;right:14px;top:120px;z-index:2147483647;` +
 		`display:flex;align-items:center;gap:9px;max-width:360px;box-sizing:border-box;` +
 		`padding:9px 11px;` +
 		`font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;` +

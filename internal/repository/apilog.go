@@ -14,6 +14,7 @@ type APILog struct {
 	StatusCode         int             `json:"status_code"`
 	InputTokens        int             `json:"input_tokens"`
 	OutputTokens       int             `json:"output_tokens"`
+	ThinkingTokens     *int            `json:"thinking_tokens"`
 	DurationMs         int64           `json:"duration_ms"`
 	FirstTokenMs       int64           `json:"first_token_ms"`
 	TPS                float64         `json:"tps"`
@@ -33,7 +34,8 @@ type APILog struct {
 }
 
 // APILogStats summarizes all retained logs, independently of pagination.
-// Tokens are the request/response estimates recorded in those logs.
+// Tokens are the request/response estimates recorded in those logs; output
+// includes visible thinking so the cards match what the model produced.
 type APILogStats struct {
 	Calls        int64 `json:"calls"`
 	Success      int64 `json:"success"`
@@ -49,7 +51,7 @@ func GetAPILogStats() (APILogStats, error) {
 		COUNT(*) AS calls,
 		COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success,
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,
-		COALESCE(SUM(output_tokens), 0) AS output_tokens
+		COALESCE(SUM(output_tokens + COALESCE(thinking_tokens, 0)), 0) AS output_tokens
 	`).Scan(&stats).Error
 	stats.Failed = stats.Calls - stats.Success
 	stats.TotalTokens = stats.InputTokens + stats.OutputTokens
@@ -69,8 +71,12 @@ func GetAPILog(id int64) (APILog, bool) {
 // replies have no measurable decode interval; replays have no model generation.
 func (l *APILog) calculateTPS() {
 	l.TPS = 0
-	if l.DurationMs > 0 && l.OutputTokens > 0 && l.SessionAction != "replay" {
-		l.TPS = float64(l.OutputTokens) * 1000 / float64(l.DurationMs)
+	output := l.OutputTokens
+	if l.ThinkingTokens != nil {
+		output += *l.ThinkingTokens
+	}
+	if l.DurationMs > 0 && output > 0 && l.SessionAction != "replay" {
+		l.TPS = float64(output) * 1000 / float64(l.DurationMs)
 	}
 }
 

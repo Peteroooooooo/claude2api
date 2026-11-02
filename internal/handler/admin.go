@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"claude2api/internal/config"
 	"claude2api/internal/repository"
@@ -91,7 +92,9 @@ func importAccounts(items []accountImport) <-chan importResult {
 				if account == nil {
 					account = &repository.Account{Email: info.Email}
 				}
+				now := time.Now().UTC()
 				account.OrgUUID, account.Status = info.OrgUUID, "active"
+				account.SubscriptionPlan, account.Models, account.ModelsUpdatedAt = info.SubscriptionPlan, info.Models, &now
 				if account.Cookies == nil {
 					account.Cookies = map[string]string{}
 				}

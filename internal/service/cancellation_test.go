@@ -50,7 +50,7 @@ func TestClientCancellationReachesNativeCompletion(t *testing.T) {
 	c := &ClaudeAI{orgUUID: "org", client: h, headers: map[string]string{}}
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.SendMessage("conv", "claude-sonnet-5-5", Prompt{Context: ctx, Text: "hello"}, nil, nil, nil)
+		_, _, err := c.SendMessage("", "conv", "claude-sonnet-5-5", Prompt{Context: ctx, Text: "hello"}, nil, nil, nil)
 		done <- err
 	}()
 	select {

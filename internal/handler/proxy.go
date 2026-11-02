@@ -219,6 +219,7 @@ func proxyModifyResponse(resp *http.Response) error {
 		data = rewriteBody(data, pc.mainOrig, pc.ucOrig)
 	}
 	if injectBar {
+		data = injectBrowserCompat(data)
 		data = injectPoolBar(data, pc.email)
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(data))
@@ -346,6 +347,9 @@ func ServeReverseProxy(w http.ResponseWriter, r *http.Request, onMain bool) {
 		http.Error(w, "no selected account", http.StatusUnauthorized)
 		return
 	}
+	if onMain {
+		syncAccountOrgCookie(w, r, record.OrgUUID)
+	}
 	email := record.Email
 	mainOrig := requestOrigin(r)
 	ucOrig := artifactOrigin(r)
@@ -381,6 +385,20 @@ func ServeReverseProxy(w http.ResponseWriter, r *http.Request, onMain bool) {
 		}
 	}()
 	newProxy.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// 前端根据此 Cookie 选择带模型配置的组织启动接口，切号时需同步。
+func syncAccountOrgCookie(w http.ResponseWriter, r *http.Request, orgUUID string) {
+	if orgUUID == "" {
+		return
+	}
+	if cookie, err := r.Cookie("lastActiveOrg"); err == nil && cookie.Value == orgUUID {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: "lastActiveOrg", Value: orgUUID, Path: "/", MaxAge: 31536000,
+		Secure: requestScheme(r) == "https", SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func artifactAuth(path string) (string, string, string, bool) {
@@ -528,6 +546,35 @@ func rewriteBody(data []byte, mainOrigin, ucOrigin string) []byte {
 	text = strings.ReplaceAll(text, "https://"+upstreamHost, mainOrigin)
 	text = strings.ReplaceAll(text, "//"+upstreamHost, "//"+mainNet)
 	return []byte(text)
+}
+
+// HTTP 内网地址没有原生 randomUUID，在上游脚本执行前用安全随机数补齐。
+const browserCompatScript = `<script>
+(function () {
+  var crypto = globalThis.crypto;
+  if (!crypto || typeof crypto.randomUUID === "function") return;
+  crypto.randomUUID = function randomUUID() {
+    var bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    var hex = Array.from(bytes, function (b) {
+      return b.toString(16).padStart(2, "0");
+    }).join("");
+    return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +
+      hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+  };
+})();
+</script>`
+
+var headOpenTagRe = regexp.MustCompile(`(?i)<head(?:\s[^>]*)?>`)
+
+func injectBrowserCompat(data []byte) []byte {
+	loc := headOpenTagRe.FindIndex(data)
+	if loc == nil {
+		return data
+	}
+	text := string(data)
+	return []byte(text[:loc[1]] + browserCompatScript + text[loc[1]:])
 }
 
 // injectPoolBar 注入账号浮条。

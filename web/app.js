@@ -546,7 +546,7 @@ async function openDetail(email) {
     ],
     ["组织 UUID", a.org_uuid || "—"],
     ["套餐", accountPlanText(a.subscription_plan)],
-    ["套餐可用模型", a.models?.length ? a.models.map((model) => model.id).join("、") : "请刷新账号"],
+    ["可用模型", ""],
     ["模型记录时间", a.models_updated_at ? fmtTime(a.models_updated_at) : "暂无记录"],
     ["5 小时用量", usageWindowText(a, "5h")],
     ["7 天用量", usageWindowText(a, "7d")],
@@ -567,7 +567,9 @@ async function openDetail(email) {
   const info = rows
     .map(
       ([k, v]) =>
-        `<div class="dl-row"><span class="dl-key">${esc(k)}</span><span class="dl-val mono usage-window${k === "套餐可用模型" ? " model-list" : ""}">${k === "套餐可用模型" && a.models?.length ? a.models.map((model) => `<span class="model-pill model-icon-label">${esc(model.id)}</span>`).join("") : esc(v)}</span></div>`,
+        k === "可用模型"
+          ? `<div class="dl-row"><span class="dl-key">${esc(k)}</span><span class="dl-val">${accountModelEditor(a)}</span></div>`
+          : `<div class="dl-row"><span class="dl-key">${esc(k)}</span><span class="dl-val mono usage-window">${esc(v)}</span></div>`,
     )
     .join("");
 
@@ -575,6 +577,49 @@ async function openDetail(email) {
   $("#detail-body").innerHTML = `<div class="detail-info">${info}</div>`;
   $("#detail-mask").classList.remove("hidden");
 }
+
+// 套餐目录内的模型可逐个停用；停用后该账号不再参与这个模型（含 -thinking）的调度。
+function accountModelEditor(a) {
+  const plan = a.plan_models || [];
+  if (!plan.length) return '<span class="model-empty">暂无套餐模型记录，请先刷新账号</span>';
+  const disabled = new Set(a.disabled_models || []);
+  const pills = plan
+    .map((m) => `<button type="button" class="model-pill model-icon-label model-toggle${disabled.has(m.id) ? " is-off" : ""}" data-model="${esc(m.id)}" aria-pressed="${!disabled.has(m.id)}" title="点击${disabled.has(m.id) ? "启用" : "停用"}">${esc(m.id)}</button>`)
+    .join("");
+  return `<div class="model-editor" data-email="${esc(a.email)}">
+    <div class="model-list">${pills}</div>
+    <div class="model-editor-foot"><span class="model-editor-hint">点击切换启用/停用，停用的模型不会再分配到此账号</span>
+    <button type="button" class="btn btn-sm model-editor-save" disabled>保存</button></div>
+  </div>`;
+}
+
+$("#detail-body").addEventListener("click", async (e) => {
+  const editor = e.target.closest(".model-editor");
+  if (!editor) return;
+  const toggle = e.target.closest(".model-toggle");
+  if (toggle) {
+    const off = toggle.classList.toggle("is-off");
+    toggle.setAttribute("aria-pressed", String(!off));
+    toggle.title = `点击${off ? "启用" : "停用"}`;
+    editor.querySelector(".model-editor-save").disabled = false;
+    return;
+  }
+  const save = e.target.closest(".model-editor-save");
+  if (!save) return;
+  const email = editor.dataset.email;
+  const disabled = [...editor.querySelectorAll(".model-toggle.is-off")].map((el) => el.dataset.model);
+  save.disabled = true;
+  try {
+    const { account } = await api("/api/accounts/models", "POST", { email, disabled });
+    const index = ACCOUNTS.findIndex((x) => x.email === email);
+    if (index >= 0) ACCOUNTS[index] = account;
+    showMsg(disabled.length ? `已保存，停用 ${disabled.length} 个模型` : "已保存，全部模型启用", "ok");
+    loadAccountModels();
+  } catch (err) {
+    save.disabled = false;
+    showMsg("保存失败: " + err.message, "err");
+  }
+});
 
 function closeDetail() {
   $("#detail-mask").classList.add("hidden");

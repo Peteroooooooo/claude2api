@@ -232,6 +232,11 @@ body {
   line-height: 18px;
 }
 button.model-pill { cursor: pointer; }
+.model-editor { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.model-toggle.is-off { opacity: .45; text-decoration: line-through; border-style: dashed; }
+.model-toggle.is-off::before { filter: grayscale(1); }
+.model-editor-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.model-editor-hint { color: var(--muted); font-size: 11px; }
 button.model-pill:hover {
   border-color: var(--accent);
   color: var(--accent);

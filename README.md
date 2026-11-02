@@ -136,6 +136,8 @@ Docker 镜像把 auth 目录放在 `/app/data/auth`，与现有 data 挂载一�
 
 导入账号、手动刷新账号和定期巡检都会同步套餐和模型目录。升级后服务启动时会自动为缺少记录的已有账号补刷一次；没有套餐或模型记录时返回空列表，不使用旧名单兜底。账号页、在线测试、`/v1/models` 和账号调度共用套餐筛选规则；实际调用仍受账号当前额度及组织权限限制。
 
+账号详情页可逐个停用套餐目录内的模型（POST /api/accounts/models，body 为 `{"email","disabled":[...]}`）。停用后该账号不再参与这个模型及其 `-thinking` 版本的调度，也不计入 `/v1/models`；刷新账号会更新目录但保留停用列表。已有数据库字段迁移为 `migrations/20261103_add_account_disabled_models.sql`，或由启动 AutoMigrate 补齐。
+
 已有数据库的模型字段迁移为 `migrations/20261029_add_account_models.sql`，套餐字段迁移为 `migrations/20261029_add_account_plan.sql`；启动时 AutoMigrate 也会补齐字段，两种方式选择一种，不能重复执行 SQL。
 
 ### Thinking 与 effort

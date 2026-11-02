@@ -1,7 +1,9 @@
 package service
 
 import (
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +23,8 @@ type PublicAccount struct {
 	Usage            *repository.AccountUsage  `json:"usage"`
 	UsageUpdatedAt   *time.Time                `json:"usage_updated_at"`
 	Models           []repository.AccountModel `json:"models"`
+	PlanModels       []repository.AccountModel `json:"plan_models"`
+	DisabledModels   []string                  `json:"disabled_models"`
 	ModelsUpdatedAt  *time.Time                `json:"models_updated_at"`
 }
 
@@ -58,6 +62,8 @@ func PublicAccountView(account *repository.Account) *PublicAccount {
 		Usage:            account.Usage,
 		UsageUpdatedAt:   account.UsageUpdatedAt,
 		Models:           AccountModels(account),
+		PlanModels:       PlanModels(account),
+		DisabledModels:   append([]string{}, account.DisabledModels...),
 		ModelsUpdatedAt:  account.ModelsUpdatedAt,
 	}
 }
@@ -118,8 +124,20 @@ func RefreshAccount(email string) (*repository.Account, bool) {
 	return repository.AccountByEmail(info.Email), false
 }
 
-// AccountModels 按套餐筛选目录；Free 仅开放 Sonnet 和 Haiku。
+// AccountModels 按套餐筛选目录并去掉管理员停用的模型；Free 仅开放 Sonnet 和 Haiku。
+// 调度、/v1/models 和账号页都以此为准。
 func AccountModels(account *repository.Account) []repository.AccountModel {
+	models := []repository.AccountModel{}
+	for _, model := range PlanModels(account) {
+		if !slices.Contains(account.DisabledModels, model.ID) {
+			models = append(models, model)
+		}
+	}
+	return models
+}
+
+// PlanModels 返回套餐允许的完整目录，不考虑手动停用，供管理页编辑。
+func PlanModels(account *repository.Account) []repository.AccountModel {
 	models := []repository.AccountModel{}
 	if account.SubscriptionPlan == "" {
 		return models
@@ -131,6 +149,33 @@ func AccountModels(account *repository.Account) []repository.AccountModel {
 		models = append(models, model)
 	}
 	return models
+}
+
+// SetDisabledModels 保存手动停用列表，只接受套餐目录内的模型 ID。
+func SetDisabledModels(email string, disabled []string) (*repository.Account, error) {
+	account := repository.AccountByEmail(email)
+	if account == nil {
+		return nil, fmt.Errorf("账号不存在")
+	}
+	allowed := map[string]bool{}
+	for _, model := range PlanModels(account) {
+		allowed[model.ID] = true
+	}
+	clean := []string{}
+	for _, id := range disabled {
+		id = strings.TrimSuffix(strings.TrimSpace(id), "-thinking")
+		if !allowed[id] {
+			return nil, fmt.Errorf("模型 %s 不在该账号套餐目录内", id)
+		}
+		if !slices.Contains(clean, id) {
+			clean = append(clean, id)
+		}
+	}
+	if !repository.UpdateAccount(email, func(a *repository.Account) { a.DisabledModels = clean }) {
+		return nil, fmt.Errorf("保存失败")
+	}
+	slog.Info("[账号模型] 已更新停用模型", "email", email, "disabled", clean)
+	return repository.AccountByEmail(email), nil
 }
 
 func AccountSupportsModel(account *repository.Account, model string) bool {

@@ -28,7 +28,7 @@ function initOverview(root, api, showMsg) {
         ["账号数", numbers.format(usage.accounts), `${numbers.format(usage.active_accounts)} 个正常账号`],
         ["请求数", numbers.format(summary.requests), `成功率 ${success}`],
         ["总 Token · 估算", numbers.format(summary.total_tokens), `输入 ${shortNumbers.format(summary.input_tokens)} · 输出 ${shortNumbers.format(summary.output_tokens + summary.thinking_tokens)}`],
-        ["可见思考 · 估算", numbers.format(summary.thinking_tokens), "缓存用量未提供"],
+        ["可见思考 · 估算", numbers.format(summary.thinking_tokens), `续聊复用历史 ${shortNumbers.format(summary.cache_read_tokens || 0)}`],
         ["平均首字", summary.first_token_samples ? `${(summary.first_token_ms / 1000).toFixed(2)} s` : "—", `${numbers.format(summary.first_token_samples)} 个有输出的请求`],
       ];
       $("#overview-metrics").innerHTML = metrics.map(([label, value, detail]) => `<div class="overview-metric"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(detail)}</small></div>`).join("");

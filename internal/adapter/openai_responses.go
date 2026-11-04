@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"claude2api/internal/repository"
 	"claude2api/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -174,7 +175,7 @@ func responsesNonStream(c *gin.Context, model string, prompt service.Prompt) {
 	}
 	text = stripThinkingTags(text)
 	out := responseObject("resp_"+shortID(), model, "completed", text, time.Now().Unix())
-	out["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
+	out["usage"] = responsesUsage(usage)
 	c.JSON(http.StatusOK, out)
 }
 
@@ -225,7 +226,7 @@ func responsesStream(c *gin.Context, model string, prompt service.Prompt) {
 	stream.emit("response.output_item.done", gin.H{"output_index": 0, "item": doneItem})
 	completed := responseObject(id, model, "completed", text, created)
 	completed["output"] = []gin.H{doneItem}
-	completed["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
+	completed["usage"] = responsesUsage(usage)
 	stream.emit("response.completed", gin.H{"response": completed})
 }
 
@@ -281,7 +282,7 @@ func responsesToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 			"output": output, "output_text": "",
 			"parallel_tool_calls": true, "tool_choice": "auto", "tools": []any{},
 			"text":  gin.H{"format": gin.H{"type": "text"}},
-			"usage": gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens},
+			"usage": responsesUsage(usage),
 		}
 		c.JSON(http.StatusOK, out)
 		return
@@ -289,7 +290,7 @@ func responsesToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 
 	text := formatOpenAITaggedAnswer(parsed)
 	out := responseObject(id, model, "completed", text, created)
-	out["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
+	out["usage"] = responsesUsage(usage)
 	c.JSON(http.StatusOK, out)
 }
 
@@ -382,6 +383,19 @@ func responsesToolStream(c *gin.Context, model string, prompt service.Prompt) {
 	completed := responseObject(id, model, "completed", "", created)
 	completed["output"] = output
 	completed["output_text"] = textBuf.String()
-	completed["usage"] = gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens, "total_tokens": usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens}
+	completed["usage"] = responsesUsage(usage)
 	stream.emit("response.completed", gin.H{"response": completed})
+}
+
+// responsesUsage 按 Responses API 语义返回用量（input_tokens 含缓存读取部分）。
+func responsesUsage(usage repository.TextUsage) gin.H {
+	input := usage.InputTokens + usage.CacheReadTokens
+	output := usage.OutputTokens + usage.ThinkingTokens
+	return gin.H{
+		"input_tokens":          input,
+		"input_tokens_details":  gin.H{"cached_tokens": usage.CacheReadTokens},
+		"output_tokens":         output,
+		"output_tokens_details": gin.H{"reasoning_tokens": usage.ThinkingTokens},
+		"total_tokens":          input + output,
+	}
 }

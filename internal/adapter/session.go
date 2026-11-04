@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"claude2api/internal/service"
@@ -11,11 +12,22 @@ import (
 	"github.com/google/uuid"
 )
 
+// keyWhitespace 把任意连续空白折叠成单个空格。续聊时客户端会把我们上一轮的
+// 回复原样回传，但流式与非流式、思考块与最终答案块之间的换行数常有细微出入
+// （思考块前导空格、最终答案块前导换行等）。只要折叠空白再比较，边界键就能稳定
+// 命中，不会因为一两个换行的差异而被迫重建会话。
+var keyWhitespace = regexp.MustCompile(`\s+`)
+
+// normalizeKeyContent 归一化用于会话匹配的文本：去除首尾空白并折叠内部空白。
+func normalizeKeyContent(content string) string {
+	return keyWhitespace.ReplaceAllString(strings.TrimSpace(content), " ")
+}
+
 func messageKey(message Message) string {
 	if len(message.Images) == 0 {
 		message.Images = []string{}
 	}
-	content := strings.TrimSpace(message.Content)
+	content := normalizeKeyContent(message.Content)
 	calls := make([]map[string]any, 0, len(message.ToolCalls))
 	for _, call := range message.ToolCalls {
 		calls = append(calls, map[string]any{"name": call.Name, "arguments": decodeArgs(call.Arguments)})
@@ -60,7 +72,7 @@ func prepareHistory(prompt *service.Prompt, messages []Message, tools []map[stri
 			value["calls"] = append(oldCalls, newCalls...)
 			oldContent, _ := value["content"].(string)
 			newContent, _ := current["content"].(string)
-			value["content"] = strings.TrimSpace(oldContent + "\n\n" + newContent)
+			value["content"] = normalizeKeyContent(oldContent + " " + newContent)
 			if len(oldCalls)+len(newCalls) > 0 {
 				value["content"] = ""
 			}

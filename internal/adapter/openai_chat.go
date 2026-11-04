@@ -188,11 +188,7 @@ func openAINonStream(c *gin.Context, model string, prompt service.Prompt) {
 			"message":       gin.H{"role": "assistant", "content": content},
 			"finish_reason": "stop",
 		}},
-		"usage": gin.H{
-			"prompt_tokens":     usage.InputTokens,
-			"completion_tokens": usage.OutputTokens + usage.ThinkingTokens,
-			"total_tokens":      usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens,
-		},
+		"usage": openAIChatUsage(usage),
 	})
 }
 
@@ -219,11 +215,7 @@ func (s *chatStream) complete(reason string, usage repository.TextUsage, include
 	if includeUsage {
 		s.data(gin.H{
 			"id": s.id, "object": "chat.completion.chunk", "created": s.created, "model": s.model,
-			"choices": []any{}, "usage": gin.H{
-				"prompt_tokens":     usage.InputTokens,
-				"completion_tokens": usage.OutputTokens + usage.ThinkingTokens,
-				"total_tokens":      usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens,
-			},
+			"choices": []any{}, "usage": openAIChatUsage(usage),
 		})
 	}
 	s.done()
@@ -287,11 +279,7 @@ func openAIToolNonStream(c *gin.Context, model string, prompt service.Prompt) {
 			"message":       message,
 			"finish_reason": finish,
 		}},
-		"usage": gin.H{
-			"prompt_tokens":     usage.InputTokens,
-			"completion_tokens": usage.OutputTokens + usage.ThinkingTokens,
-			"total_tokens":      usage.InputTokens + usage.OutputTokens + usage.ThinkingTokens,
-		},
+		"usage": openAIChatUsage(usage),
 	})
 }
 
@@ -340,4 +328,18 @@ func openAIToolStream(c *gin.Context, model string, prompt service.Prompt, inclu
 		stream.send(gin.H{"content": "\n[错误] " + err.Error()}, nil)
 	}
 	stream.complete(stopReason, usage, includeUsage)
+}
+
+// openAIChatUsage 按 OpenAI 语义返回用量：prompt_tokens 包含缓存读取的历史，
+// 其中续聊复用的部分放在 prompt_tokens_details.cached_tokens。
+func openAIChatUsage(usage repository.TextUsage) gin.H {
+	prompt := usage.InputTokens + usage.CacheReadTokens
+	completion := usage.OutputTokens + usage.ThinkingTokens
+	return gin.H{
+		"prompt_tokens":             prompt,
+		"completion_tokens":         completion,
+		"total_tokens":              prompt + completion,
+		"prompt_tokens_details":     gin.H{"cached_tokens": usage.CacheReadTokens},
+		"completion_tokens_details": gin.H{"reasoning_tokens": usage.ThinkingTokens},
+	}
 }

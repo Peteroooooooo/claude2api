@@ -559,7 +559,7 @@ async function openDetail(email) {
     const query = new URLSearchParams({ account: email, days: 0, group: "model", offset: 0, limit: 10, timezone_offset: new Date().getTimezoneOffset() });
     const { usage } = await api(`/api/usage?${query}`);
     const stats = usage.summary;
-    rows.push(["累计对话", stats.requests.toLocaleString("zh-CN")], ["输入 Token（估算）", stats.input_tokens.toLocaleString("zh-CN")], ["回答与工具（估算）", stats.output_tokens.toLocaleString("zh-CN")], ["可见思考（估算）", stats.thinking_tokens.toLocaleString("zh-CN")], ["缓存用量", "未提供"]);
+    rows.push(["累计对话", stats.requests.toLocaleString("zh-CN")], ["输入 Token（估算）", stats.input_tokens.toLocaleString("zh-CN")], ["回答与工具（估算）", stats.output_tokens.toLocaleString("zh-CN")], ["可见思考（估算）", stats.thinking_tokens.toLocaleString("zh-CN")], ["缓存读取（续聊复用历史）", (stats.cache_read_tokens || 0).toLocaleString("zh-CN")]);
   } catch (error) {
     rows.push(["累计用量", `读取失败：${error.message}`]);
   }
@@ -932,7 +932,7 @@ const fmtSeconds = (ms) => ms ? `${(ms / 1000).toFixed(2)} s` : "—";
 const logNumbers = new Intl.NumberFormat("zh-CN");
 const logOutputTokens = (log) => (log.output_tokens || 0) + (log.thinking_tokens ?? 0);
 const fmtTPS = (log) => log.session_action === "replay" ? "复用" : log.duration_ms > 0 && logOutputTokens(log) > 0 ? `≈${Number(log.tps || 0).toFixed(1)}` : "—";
-const sessionLabels = {new:"新建",continue:"续聊",rebuild:"重建",switch:"换号",replay:"结果复用",interrupted:"中断"};
+const sessionLabels = {new:"新建",continue:"续聊",fork:"分叉",rebuild:"重建",switch:"换号",replay:"结果复用",interrupted:"中断"};
 
 function renderLogSummary(stats) {
   const number = (value) => Number(value || 0).toLocaleString("zh-CN");
@@ -1054,12 +1054,12 @@ async function showLogDetail(id) {
       <div class="log-detail-meta">
         <div class="log-meta-item"><small>请求</small><b>${esc(l.endpoint)}</b><span class="model-icon-label">${esc(l.model || "—")}</span></div>
         ${logMeta("账号", l.account || "—")}
-		${l.session_action ? logMeta("会话", ({new:"新建",continue:"续聊",rebuild:"重建",switch:"换号恢复",replay:"重复请求复用",interrupted:"中断"})[l.session_action] || l.session_action, `本轮上传 ${l.upstream_input_bytes || 0} 字节${l.switch_reason ? " · " + l.switch_reason : ""}`) : ""}
+		${l.session_action ? logMeta("会话", ({new:"新建",continue:"续聊",fork:"分叉续接",rebuild:"重建",switch:"换号恢复",replay:"重复请求复用",interrupted:"中断"})[l.session_action] || l.session_action, `本轮上传 ${l.upstream_input_bytes || 0} 字节${l.switch_reason ? " · " + l.switch_reason : ""}${l.continuation_miss ? " · 未续聊：" + l.continuation_miss : ""}`) : ""}
 		${l.upstream_model ? logMeta("上游模型", l.upstream_model, `thinking_mode=${l.thinking_mode || "默认"} · effort=${l.effort || "网页默认"}`) : ""}
         ${logMeta("结果", `${l.success ? "成功" : "失败"} · HTTP ${l.status_code || "—"}`, fmtTime(l.created_at))}
         ${logMeta("性能", `${fmtSeconds(l.first_token_ms)} 首字`, `${fmtTPS(l)} TPS · ${fmtSeconds(l.duration_ms)} 总耗时`)}
         ${logMeta("可见思考", l.thinking_tokens == null ? "未记录" : `${l.thinking_tokens} 估算 Token`)}
-        ${logMeta("用量来源", "可见文本估算", "缓存用量未提供")}
+        ${logMeta("用量来源", "本地按实际发送内容估算", `缓存读取 ${l.cache_read_tokens || 0} Token（续聊复用的历史）`)}
       </div>
       ${l.error ? `<div class="log-error-box"><b>请求错误</b><span>${esc(l.error)}</span></div>` : ""}
       ${l.conversation_id ? `<details class="log-tools"><summary>会话续聊详情</summary><pre>${esc(JSON.stringify({session_id:l.session_id,conversation_id:l.conversation_id,parent_uuid:l.parent_uuid,message_uuid:l.message_uuid},null,2))}</pre></details>` : ""}

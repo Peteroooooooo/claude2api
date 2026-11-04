@@ -18,7 +18,10 @@ type ChatSession struct {
 	Policy         string          `gorm:"type:text"`
 	History        json.RawMessage `gorm:"type:text;serializer:json"`
 	ReplyKey       string          `gorm:"type:text"`
-	LastTurn       string
+	// Anchors 记录本网页会话里每个已完成回复的消息 UUID 及其在客户端历史中的位置，
+	// 用于从任意已知节点续接（客户端编辑/回退/重新生成时走分叉续接）。
+	Anchors  json.RawMessage `gorm:"type:text;serializer:json"`
+	LastTurn string
 	UpdatedAt      time.Time `gorm:"index"`
 }
 

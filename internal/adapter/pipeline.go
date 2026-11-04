@@ -178,10 +178,10 @@ func logCompletion(endpoint, model string, stream bool, prompt service.Prompt, o
 	log := repository.APILog{
 		Endpoint: endpoint, Model: model, Account: res.Account, Stream: stream,
 		Success: record.Success, StatusCode: res.StatusCode,
-		InputTokens: record.InputTokens, OutputTokens: record.OutputTokens, ThinkingTokens: &record.ThinkingTokens,
+		InputTokens: record.InputTokens, CacheReadTokens: record.CacheReadTokens, OutputTokens: record.OutputTokens, ThinkingTokens: &record.ThinkingTokens,
 		DurationMs: durationMs, FirstTokenMs: firstTokenMs,
 		SessionID: res.SessionID, ConversationID: res.ConversationID, ParentUUID: res.ParentUUID, MessageUUID: res.MessageUUID,
-		SessionAction: res.Action, UpstreamInputBytes: res.InputBytes, SwitchReason: res.SwitchReason,
+		SessionAction: res.Action, UpstreamInputBytes: res.InputBytes, SwitchReason: res.SwitchReason, ContinuationMiss: res.ContinuationMiss,
 		UpstreamModel: res.UpstreamModel, ThinkingMode: res.ThinkingMode, Effort: res.Effort,
 	}
 	if config.Get().DetailedAPILog {

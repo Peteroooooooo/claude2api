@@ -7,11 +7,15 @@ import (
 	"gorm.io/gorm"
 )
 
-// TextUsage 只估算实际可见的文本，不代表上游计费 Token。
+// TextUsage 是本地按“我们实际发出/收到的内容”统计的 Token，不代表上游计费。
+// InputTokens：本轮真正发给上游的内容（提示词、固定 style、附件、图片）。
+// CacheReadTokens：续聊时上游会重新读取、但本轮没有重新上传的历史，
+// 相当于 API 的 cache_read，单独统计，不计入 InputTokens。
 type TextUsage struct {
-	InputTokens    int `json:"input_tokens"`
-	OutputTokens   int `json:"output_tokens"`   // 回答和工具参数，不含思考。
-	ThinkingTokens int `json:"thinking_tokens"` // 仅包含实际返回的思考文本。
+	InputTokens     int `json:"input_tokens"`
+	CacheReadTokens int `json:"cache_read_tokens"`
+	OutputTokens    int `json:"output_tokens"`   // 回答和工具参数，不含思考。
+	ThinkingTokens  int `json:"thinking_tokens"` // 仅包含实际返回的思考文本。
 }
 
 type UsageRecord struct {
@@ -30,6 +34,7 @@ type UsageSummary struct {
 	Requests          int64   `json:"requests"`
 	Successes         int64   `json:"successes"`
 	InputTokens       int64   `json:"input_tokens"`
+	CacheReadTokens   int64   `json:"cache_read_tokens"`
 	OutputTokens      int64   `json:"output_tokens"`
 	ThinkingTokens    int64   `json:"thinking_tokens"`
 	TotalTokens       int64   `json:"total_tokens"`
@@ -76,7 +81,7 @@ func LoadUsage(days, timezoneOffset int, account, group string, offset, limit in
 		query = query.Where("created_at >= ?", midnight.AddDate(0, 0, 1-days))
 	}
 	query = query.Session(&gorm.Session{})
-	columns := "COUNT(*) AS requests, COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS successes, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(thinking_tokens), 0) AS thinking_tokens, COALESCE(SUM(input_tokens + output_tokens + thinking_tokens), 0) AS total_tokens, COALESCE(AVG(duration_ms), 0) AS average_ms, COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0) AS first_token_ms, COUNT(CASE WHEN first_token_ms > 0 THEN 1 END) AS first_token_samples, COALESCE(MAX(created_at), '') AS last_used"
+	columns := "COUNT(*) AS requests, COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0) AS successes, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens, COALESCE(SUM(thinking_tokens), 0) AS thinking_tokens, COALESCE(SUM(input_tokens + output_tokens + thinking_tokens), 0) AS total_tokens, COALESCE(AVG(duration_ms), 0) AS average_ms, COALESCE(AVG(CASE WHEN first_token_ms > 0 THEN first_token_ms END), 0) AS first_token_ms, COUNT(CASE WHEN first_token_ms > 0 THEN 1 END) AS first_token_samples, COALESCE(MAX(created_at), '') AS last_used"
 	if err := query.Select(columns).Scan(&result.Summary).Error; err != nil {
 		return result, err
 	}

@@ -51,6 +51,9 @@ func CaptureAccountUsage(body io.ReadCloser, record *repository.UsageRecord, inp
 					Text        string `json:"text"`
 					Thinking    string `json:"thinking"`
 					PartialJSON string `json:"partial_json"`
+					Summary     struct {
+						Summary string `json:"summary"`
+					} `json:"summary"`
 				} `json:"delta"`
 			}
 			if err := json.Unmarshal(decoder.Event().Data, &event); err != nil {
@@ -68,6 +71,9 @@ func CaptureAccountUsage(body io.ReadCloser, record *repository.UsageRecord, inp
 					output.WriteString(event.Delta.Text)
 				case "thinking_delta":
 					thinking.WriteString(event.Delta.Thinking)
+				case "thinking_summary_delta":
+					// 网页端的可见思考通常以摘要形式下发，也是我们返回给客户端的文本。
+					thinking.WriteString(event.Delta.Summary.Summary)
 				case "input_json_delta":
 					output.WriteString(event.Delta.PartialJSON)
 				}

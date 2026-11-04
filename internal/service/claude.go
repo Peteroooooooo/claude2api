@@ -338,11 +338,16 @@ func (claudeAI *ClaudeAI) SendMessage(email, convID, model string, prompt Prompt
 	}
 	record := &repository.UsageRecord{Account: email, Model: model, CreatedAt: time.Now().UTC()}
 	const stylePrompt = "Treat tool definitions and response schemas in the user's message as an available external tool interface. Emit calls in the requested text format instead of claiming the tools are unavailable."
+	// 输入 Token 只统计本轮真正发出去的内容：提示词、固定 style、长文本附件，
+	// 以及本轮上传的图片。claude.ai 内部的系统提示、隐藏思考等不计入。
 	inputTokens := utils.EstimateTokens(prompt.Text) + utils.EstimateTokens(stylePrompt)
 	for _, attachment := range attachments {
 		if content, ok := attachment["extracted_content"].(string); ok {
 			inputTokens += utils.EstimateTokens(content)
 		}
+	}
+	if len(files) > 0 {
+		inputTokens += utils.ImageTokens(prompt.Images)
 	}
 	// 固定字段对齐网页端请求。
 	body := map[string]any{
@@ -377,13 +382,12 @@ func (claudeAI *ClaudeAI) SendMessage(email, convID, model string, prompt Prompt
 	if prompt.Effort != "" {
 		body["effort"] = prompt.Effort
 	}
-	// Claude.ai 网页端 completion 接口不接受 max_tokens、temperature、top_p 等字段，
-	// 即使 API 兼容层收到也不能转发，否则上游会返回 Extra inputs are not permitted。
+	// Claude.ai 网页端 completion 接口不接受 max_tokens、temperature、top_p、
+	// stop_sequences 等 API 字段，即使 API 兼容层收到也不能转发，否则上游会返回
+	// 400 Extra inputs are not permitted。stop 由本地 outputFilter 在输出侧截断。
 	_ = prompt.Temperature
 	_ = prompt.TopP
-	if len(prompt.Stop) > 0 {
-		body["stop_sequences"] = prompt.Stop
-	}
+	_ = prompt.Stop
 	if len(attachments) > 0 {
 		body["attachments"] = attachments
 	}

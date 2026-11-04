@@ -69,6 +69,35 @@ func TestToolReplyMatchesReturnedHistoryAndKeepsCallID(t *testing.T) {
 	}
 }
 
+func TestThinkingReplyBlocksMatchStoredReplyKey(t *testing.T) {
+	// 复现线上真实形态：上游输出“思考 + 最终答案”，客户端回传时拆成两个 text 块，
+	// 且换行数与我们拼接的不同；归一化后仍须命中，才能续聊而不是重建。
+	tools := `"tools":[{"name":"echo","input_schema":{"type":"object"}}]`
+	first := `{"metadata":{"session_id":"s-think"},"system":"sys","messages":[{"role":"user","content":"q1"}],` + tools + `}`
+	second := `{"metadata":{"session_id":"s-think"},"system":"sys","messages":[{"role":"user","content":"q1"},{"role":"assistant","content":[{"type":"text","text":" plan it"},{"type":"text","text":"\nThe answer\n","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"q2"}],` + tools + `}`
+	raw := "<think> plan it</think>\n<final_answer>\nThe answer\n</final_answer>"
+	old := runner
+	defer func() { runner = old }()
+	var seen []service.Prompt
+	runner = testRunner(func(_ string, p service.Prompt, emit func(string)) (service.CompletionResult, error) {
+		seen = append(seen, p)
+		emit(raw)
+		return service.CompletionResult{StatusCode: 200}, nil
+	})
+	for _, body := range []string{first, second} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+		AnthropicMessages(c)
+		if w.Code != 200 {
+			t.Fatal(w.Body.String())
+		}
+	}
+	if len(seen) != 2 || seen[0].ReplyKey(raw) != seen[1].History[1].Key {
+		t.Fatalf("thinking reply cannot continue: %s vs %s", seen[0].ReplyKey(raw), seen[1].History[1].Key)
+	}
+}
+
 func TestHistoryImagesStayOnTheirOriginalTurn(t *testing.T) {
 	image := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	messages := []anthropicMessage{{Role: "user", Content: json.RawMessage(`[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + image + `"}}]`)}, {Role: "assistant", Content: json.RawMessage(`"image seen"`)}, {Role: "user", Content: json.RawMessage(`"next"`)}}

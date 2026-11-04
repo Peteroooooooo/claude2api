@@ -25,6 +25,8 @@ type fakeWeb struct {
 	calls            []nativeCall
 	parents          map[string]string
 	message          int
+	tree             bool            // true 时像真实网页端一样允许挂在任意已有消息下（分叉）。
+	known            map[string]bool // conv + "/" + messageUUID
 	onComplete       func(nativeCall, int) (int, string)
 }
 type fakeHTTP struct {
@@ -74,7 +76,7 @@ func (client *fakeHTTP) Do(req *fhttp.Request) (*fhttp.Response, error) {
 		call.ThinkingMode, _ = body["thinking_mode"].(string)
 		call.Effort, _ = body["effort"].(string)
 		w.calls = append(w.calls, call)
-		if call.Parent != w.parents[conv] {
+		if call.Parent != w.parents[conv] && !(w.tree && (call.Parent == rootMessageUUID || w.known[conv+"/"+call.Parent])) {
 			return response(400, "incorrect parent UUID"), nil
 		}
 		if w.onComplete != nil {
@@ -85,6 +87,7 @@ func (client *fakeHTTP) Do(req *fhttp.Request) (*fhttp.Response, error) {
 		w.message++
 		id := fmt.Sprintf("message-%d", w.message)
 		w.parents[conv] = id
+		w.known[conv+"/"+id] = true
 		return response(200, sseReply(id, "SAVED")), nil
 	}
 	return response(200, "{}"), nil
@@ -106,7 +109,7 @@ func setupSessionTest(t *testing.T) *fakeWeb {
 			t.Fatal(err)
 		}
 	}
-	w := &fakeWeb{parents: map[string]string{}}
+	w := &fakeWeb{parents: map[string]string{}, known: map[string]bool{}}
 	oldFactory := newAPIClient
 	newAPIClient = func(key, proxy, identity string, org ...string) *ClaudeAI {
 		return &ClaudeAI{orgUUID: org[0], client: &fakeHTTP{web: w, account: identity}, headers: map[string]string{}, modeSet: true}
@@ -308,6 +311,82 @@ func TestSessionIdleCleanupSkipsActiveSession(t *testing.T) {
 	completeTest(t, p)
 	if w.created != 2 {
 		t.Fatal("cleaned session did not rebuild")
+	}
+}
+
+func TestSessionForkContinuesFromEarlierReply(t *testing.T) {
+	w := setupSessionTest(t)
+	// claude.ai 会话是树：编辑/重新生成时可以把新消息挂在任意已有消息下面。
+	w.tree = true
+	first := completeTest(t, sessionPrompt(history("user", "Q1")))
+	p := sessionPrompt(history("user", "Q1"), history("assistant", "SAVED"), history("user", "Q2"))
+	second := completeTest(t, p)
+	if second.Action != "continue" {
+		t.Fatalf("second turn not continued: %+v", second)
+	}
+	// 客户端编辑了 Q2：历史在第一条回复之后分叉。应挂到第一条回复下面，只发新的 Q2'。
+	p = sessionPrompt(history("user", "Q1"), history("assistant", "SAVED"), history("user", "Q2_EDITED"))
+	third := completeTest(t, p)
+	last := w.calls[len(w.calls)-1]
+	if third.Action != "fork" || third.ConversationID != first.ConversationID || third.ParentUUID != first.MessageUUID || w.created != 1 {
+		t.Fatalf("edit did not fork from earlier reply: %+v created=%d", third, w.created)
+	}
+	if strings.Contains(last.Text, "Q1") || !strings.Contains(last.Text, "Q2_EDITED") {
+		t.Fatalf("fork resent history: %q", last.Text)
+	}
+	// 分叉后的新回复成为最新锚点，后续正常续聊。
+	p.History = append(p.History, history("assistant", "SAVED"), history("user", "Q3"))
+	fourth := completeTest(t, p)
+	if fourth.Action != "continue" || fourth.ParentUUID != third.MessageUUID {
+		t.Fatalf("did not continue after fork: %+v", fourth)
+	}
+}
+
+func TestSessionForkRejectedFallsBackToRebuild(t *testing.T) {
+	w := setupSessionTest(t)
+	completeTest(t, sessionPrompt(history("user", "Q1")))
+	completeTest(t, sessionPrompt(history("user", "Q1"), history("assistant", "SAVED"), history("user", "Q2")))
+	// 若上游只接受当前叶子作父节点（fakeWeb 默认如此），分叉会被拒；必须退回完整重建而不是报错。
+	res := completeTest(t, sessionPrompt(history("user", "Q1"), history("assistant", "SAVED"), history("user", "Q2_EDITED")))
+	last := w.calls[len(w.calls)-1]
+	if res.ContinuationMiss != "fork_rejected" || res.Action != "rebuild" || !strings.Contains(last.Text, "Q1") || !strings.Contains(last.Text, "Q2_EDITED") {
+		t.Fatalf("rejected fork not rebuilt: %+v text=%q", res, last.Text)
+	}
+}
+
+func TestSessionPoliciesKeepSeparateConversations(t *testing.T) {
+	w := setupSessionTest(t)
+	main := sessionPrompt(history("user", "MAIN"))
+	sub := sessionPrompt(history("user", "SUB"))
+	sub.Policy = "subagent-policy"
+	completeTest(t, main)
+	completeTest(t, sub)
+	main.History = append(main.History, history("assistant", "SAVED"), history("user", "MAIN2"))
+	sub.History = append(sub.History, history("assistant", "SAVED"), history("user", "SUB2"))
+	a, b := completeTest(t, main), completeTest(t, sub)
+	if a.Action != "continue" || b.Action != "continue" || a.ConversationID == b.ConversationID || w.created != 2 {
+		t.Fatalf("interleaved policies clobbered each other: main=%+v sub=%+v", a, b)
+	}
+}
+
+func TestSessionCacheReadAndMissReason(t *testing.T) {
+	setupSessionTest(t)
+	first := completeTest(t, sessionPrompt(history("user", "Q1")))
+	if first.Usage == nil || first.Usage.CacheReadTokens != 0 {
+		t.Fatalf("new conversation must not report cache read: %+v", first.Usage)
+	}
+	p := sessionPrompt(history("user", "Q1"), history("assistant", "SAVED"), history("user", "Q2"))
+	res := completeTest(t, p)
+	if res.Action != "continue" || res.ConversationID != first.ConversationID {
+		t.Fatalf("not continued: %+v", res)
+	}
+	if res.Usage == nil || res.Usage.CacheReadTokens == 0 {
+		t.Fatalf("continued history not counted as cache read: %+v", res.Usage)
+	}
+	p = sessionPrompt(history("user", "Q1"), history("assistant", "DIFFERENT"), history("user", "Q2"))
+	miss := completeTest(t, p)
+	if miss.Action != "rebuild" || miss.ContinuationMiss != "reply_mismatch" {
+		t.Fatalf("miss reason not reported: %+v", miss)
 	}
 }
 

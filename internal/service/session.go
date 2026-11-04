@@ -14,6 +14,7 @@ import (
 
 	"claude2api/internal/config"
 	"claude2api/internal/repository"
+	"claude2api/internal/utils"
 )
 
 const rootMessageUUID = "00000000-0000-4000-8000-000000000000"
@@ -63,7 +64,12 @@ func lockSessionContext(ctx context.Context, key string, try bool) (func(), bool
 }
 
 func sessionKey(prompt Prompt) string {
-	b, _ := json.Marshal([]string{prompt.Scope, prompt.SessionID})
+	// Policy（endpoint + system + tools）参与会话键，让同一个 session_id 下的不同
+	// 请求流各自绑定独立的网页会话：Claude Code 主代理与子代理（system/tools 不同）
+	// 常交替复用同一个 session_id，若共用一条绑定就会互相覆盖 ParentUUID 和历史，
+	// 导致双方都无法续聊、每轮都重建。用 Policy 的哈希区分，互不干扰。
+	sum := sha256.Sum256([]byte(prompt.Policy))
+	b, _ := json.Marshal([]string{prompt.Scope, prompt.SessionID, hex.EncodeToString(sum[:8])})
 	return string(b)
 }
 
@@ -85,33 +91,154 @@ func turnKey(key, model string, prompt Prompt) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func continuationStart(session repository.ChatSession, prompt Prompt, model string) (int, bool) {
-	if session.ConversationID == "" || session.ParentUUID == "" || session.ParentUUID == rootMessageUUID || session.Model != model || session.Policy != prompt.Policy {
-		return 0, false
+// sessionAnchor 是网页会话里一个“可接续的节点”：某一轮成功完成的回复。
+// Upto 是这条回复在客户端历史中的下标；Prefix/Hash 分别是该回复之前、
+// 以及包含该回复在内的历史滚动哈希。只要客户端发来的历史在 Upto 处与某个
+// 锚点哈希一致，就能把新消息挂在这条回复下面续接——不一定是最新那条，
+// 客户端编辑或回退了后面的消息时就从更早的节点分叉（claude.ai 会话本身是树）。
+type sessionAnchor struct {
+	Upto   int    `json:"upto"`
+	Prefix string `json:"prefix"`
+	Hash   string `json:"hash"`
+	UUID   string `json:"uuid"`
+}
+
+const maxSessionAnchors = 64
+
+func chainHash(previous, key string) string {
+	keySum := sha256.Sum256([]byte(key))
+	sum := sha256.Sum256([]byte(previous + hex.EncodeToString(keySum[:])))
+	return hex.EncodeToString(sum[:])
+}
+
+// historyChain 返回每个前缀的滚动哈希：chain[i] 覆盖 History[0..i]。
+func historyChain(history []HistoryMessage) []string {
+	chain := make([]string, len(history))
+	previous := ""
+	for i, m := range history {
+		previous = chainHash(previous, m.Key)
+		chain[i] = previous
+	}
+	return chain
+}
+
+func loadAnchors(session repository.ChatSession) []sessionAnchor {
+	var anchors []sessionAnchor
+	if len(session.Anchors) > 0 && json.Unmarshal(session.Anchors, &anchors) == nil && len(anchors) > 0 {
+		return anchors
+	}
+	// 兼容升级前的会话：由最近一轮的 History + ReplyKey 推出唯一锚点。
+	if session.ParentUUID == "" || session.ParentUUID == rootMessageUUID || session.ReplyKey == "" {
+		return nil
 	}
 	var history []HistoryMessage
-	if json.Unmarshal(session.History, &history) != nil || len(prompt.History) <= len(history) {
-		return 0, false
+	if json.Unmarshal(session.History, &history) != nil {
+		return nil
 	}
-	for i, m := range history {
-		if m.Key != prompt.History[i].Key {
-			return 0, false
+	prefix := ""
+	if chain := historyChain(history); len(chain) > 0 {
+		prefix = chain[len(chain)-1]
+	}
+	return []sessionAnchor{{Upto: len(history), Prefix: prefix, Hash: chainHash(prefix, session.ReplyKey), UUID: session.ParentUUID}}
+}
+
+func appendAnchor(session *repository.ChatSession, prompt Prompt, replyKey, messageUUID string) {
+	anchors := loadAnchors(*session)
+	prefix := ""
+	if chain := historyChain(prompt.History); len(chain) > 0 {
+		prefix = chain[len(chain)-1]
+	}
+	next := sessionAnchor{Upto: len(prompt.History), Prefix: prefix, Hash: chainHash(prefix, replyKey), UUID: messageUUID}
+	kept := anchors[:0]
+	for _, a := range anchors {
+		if a.Hash != next.Hash {
+			kept = append(kept, a)
 		}
 	}
-	boundary := prompt.History[len(history)]
-	if boundary.Role != "assistant" || boundary.Key != session.ReplyKey {
-		return 0, false
+	kept = append(kept, next)
+	if len(kept) > maxSessionAnchors {
+		kept = kept[len(kept)-maxSessionAnchors:]
 	}
-	start := len(history) + 1
-	if start >= len(prompt.History) {
-		return 0, false
+	session.Anchors, _ = json.Marshal(kept)
+}
+
+// continuationStart 在已知锚点里找与本次历史一致、位置最靠后的那个。
+// 返回新消息起始下标、要挂接的父消息 UUID；无法续接时返回原因。
+func continuationStart(session repository.ChatSession, prompt Prompt, model string) (int, string, string) {
+	switch {
+	case session.ConversationID == "":
+		return 0, "", "no_session"
+	case session.Model != model:
+		return 0, "", "model_changed"
+	case session.Policy != prompt.Policy:
+		return 0, "", "policy_changed"
 	}
-	for _, m := range prompt.History[start:] {
-		if m.Role != "user" && m.Role != "tool" {
-			return 0, false
+	anchors := loadAnchors(session)
+	if len(anchors) == 0 {
+		return 0, "", "no_anchor"
+	}
+	chain := historyChain(prompt.History)
+	tailOK := func(start int) bool {
+		if start >= len(prompt.History) {
+			return false
+		}
+		for _, m := range prompt.History[start:] {
+			if m.Role != "user" && m.Role != "tool" {
+				return false
+			}
+		}
+		return true
+	}
+	best := -1
+	for i, a := range anchors {
+		if a.UUID == "" || a.Upto >= len(prompt.History) || chain[a.Upto] != a.Hash || prompt.History[a.Upto].Role != "assistant" || !tailOK(a.Upto+1) {
+			continue
+		}
+		if best < 0 || a.Upto > anchors[best].Upto {
+			best = i
 		}
 	}
-	return start, true
+	if best >= 0 {
+		return anchors[best].Upto + 1, anchors[best].UUID, ""
+	}
+	// 给出未命中原因，方便从日志定位重建的根因：取“回复之前的历史仍一致”且位置
+	// 最靠后的锚点，看是卡在回复本身、没有新输入，还是尾部夹了 assistant。
+	closest := -1
+	shorter := false
+	for i, a := range anchors {
+		if a.Upto >= len(prompt.History) {
+			shorter = true
+			continue
+		}
+		if (a.Upto == 0 && a.Prefix == "") || (a.Upto > 0 && chain[a.Upto-1] == a.Prefix) {
+			if closest < 0 || a.Upto > anchors[closest].Upto {
+				closest = i
+			}
+		}
+	}
+	if closest < 0 {
+		if shorter {
+			return 0, "", "history_shorter"
+		}
+		return 0, "", "history_diverged"
+	}
+	a := anchors[closest]
+	switch {
+	case prompt.History[a.Upto].Role != "assistant" || chain[a.Upto] != a.Hash:
+		return 0, "", "reply_mismatch"
+	case a.Upto+1 >= len(prompt.History):
+		return 0, "", "no_new_input"
+	default:
+		return 0, "", "assistant_in_tail"
+	}
+}
+
+func historyTokens(history []HistoryMessage) int {
+	total := 0
+	for _, m := range history {
+		total += utils.EstimateTokens(m.Text) + utils.ImageTokens(m.Images)
+	}
+	return total
 }
 
 func incrementalPrompt(prompt Prompt, start int) Prompt {
@@ -227,10 +354,18 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 	if err != nil {
 		return fail(500, err)
 	}
-	if !session.UpdatedAt.IsZero() && time.Since(session.UpdatedAt) > time.Duration(s.SessionIdleSeconds)*time.Second {
-		session.ParentUUID = ""
+	// 闲置不再主动作废续聊：网页会话仍在就继续用；若已被清理，上游会返回
+	// conversation_not_found，由下方 conversation_missing 分支自动重建。
+	start, anchorUUID, miss := continuationStart(session, prompt, reqModel)
+	reuse := miss == ""
+	forked := false
+	if reuse {
+		if anchors := loadAnchors(session); anchors[len(anchors)-1].UUID != anchorUUID {
+			forked = true
+		}
+	} else {
+		res.ContinuationMiss = miss
 	}
-	start, reuse := continuationStart(session, prompt, reqModel)
 	targetReady := reuse
 	if found && previous.Status == "failed" && previous.ConversationID == session.ConversationID && session.ParentUUID == rootMessageUUID && session.Model == reqModel && session.Policy == prompt.Policy {
 		targetReady = true
@@ -332,6 +467,8 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 			}
 			session.Account, session.OrgUUID, session.ConversationID, session.ParentUUID = account.Email, client.orgUUID, convID, rootMessageUUID
 			session.Model, session.Policy = reqModel, prompt.Policy
+			// 锚点只属于旧网页会话，换了会话必须清空，否则会挂到不存在的父消息上。
+			session.Anchors = nil
 			if err = repository.SaveChatConversation(repository.ChatConversation{ID: convID, SessionKey: key, Account: account.Email, OrgUUID: client.orgUUID}); err != nil {
 				lease.Unlock()
 				return fail(500, err)
@@ -350,10 +487,14 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 			}
 		} else if reuse {
 			res.Action = "continue"
+			if forked {
+				res.Action = "fork"
+			}
 		}
 		outgoing := prompt
 		if reuse {
 			outgoing = incrementalPrompt(prompt, start)
+			session.ParentUUID = anchorUUID
 		}
 		outgoing.ParentUUID = session.ParentUUID
 		res.ConversationID, res.ParentUUID, res.InputBytes = session.ConversationID, session.ParentUUID, len(outgoing.Text)
@@ -388,6 +529,10 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 			}
 		})
 		lease.Unlock()
+		if usage != nil && reuse {
+			// 续聊只上传新消息；上游仍会读取此前的历史，单独记为 cache_read。
+			usage.CacheReadTokens = historyTokens(prompt.History[:start])
+		}
 		res.Usage = usage
 		res.MessageUUID = turn.MessageUUID
 		if sendErr != nil && prompt.Context != nil && prompt.Context.Err() != nil {
@@ -413,13 +558,14 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 			session.History, _ = json.Marshal(prompt.History)
 			if prompt.ReplyKey != nil {
 				session.ReplyKey = prompt.ReplyKey(output.String())
+				appendAnchor(&session, prompt, session.ReplyKey, turn.MessageUUID)
 			}
 			turn.Status, turn.Response, turn.StatusCode = "completed", output.String(), 200
 			if err = repository.CommitChatTurn(&session, &turn); err != nil {
 				return fail(500, err)
 			}
 			res.StatusCode = 200
-			slog.Info("[API] 网页会话完成", "action", res.Action, "email", res.Account, "conversation", res.ConversationID, "parent", res.ParentUUID, "message", res.MessageUUID, "input_bytes", res.InputBytes, "switch_reason", res.SwitchReason)
+			slog.Info("[API] 网页会话完成", "action", res.Action, "email", res.Account, "conversation", res.ConversationID, "parent", res.ParentUUID, "message", res.MessageUUID, "input_bytes", res.InputBytes, "switch_reason", res.SwitchReason, "continuation_miss", res.ContinuationMiss)
 			return res, nil
 		}
 		turn.Response, turn.Error, turn.StatusCode = output.String(), sendErr.Error(), code
@@ -448,6 +594,13 @@ func (dispatcher Dispatcher) Complete(reqModel string, prompt Prompt, onText fun
 		if upstream != nil && upstream.Kind == "conversation" && reuse {
 			reuse, targetReady = false, false
 			res.SwitchReason = "conversation_missing"
+			err = nil
+			continue
+		}
+		// 上游不接受从较早节点分叉（父消息无效等 4xx）时，退回完整重建，不让请求失败。
+		if upstream != nil && upstream.Kind == "other" && forked && reuse && code >= 400 && code < 500 {
+			reuse, targetReady, forked = false, false, false
+			res.ContinuationMiss = "fork_rejected"
 			err = nil
 			continue
 		}

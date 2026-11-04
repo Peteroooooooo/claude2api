@@ -13,6 +13,7 @@ type APILog struct {
 	Success            bool            `json:"success"`
 	StatusCode         int             `json:"status_code"`
 	InputTokens        int             `json:"input_tokens"`
+	CacheReadTokens    int             `json:"cache_read_tokens"`
 	OutputTokens       int             `json:"output_tokens"`
 	ThinkingTokens     *int            `json:"thinking_tokens"`
 	DurationMs         int64           `json:"duration_ms"`
@@ -28,6 +29,7 @@ type APILog struct {
 	SessionAction      string          `json:"session_action,omitempty"`
 	UpstreamInputBytes int             `json:"upstream_input_bytes"`
 	SwitchReason       string          `json:"switch_reason,omitempty"`
+	ContinuationMiss   string          `json:"continuation_miss,omitempty"`
 	UpstreamModel      string          `json:"upstream_model,omitempty"`
 	ThinkingMode       string          `json:"thinking_mode,omitempty"`
 	Effort             string          `json:"effort,omitempty"`
@@ -40,9 +42,10 @@ type APILogStats struct {
 	Calls        int64 `json:"calls"`
 	Success      int64 `json:"success"`
 	Failed       int64 `json:"failed"`
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
-	TotalTokens  int64 `json:"total_tokens"`
+	InputTokens     int64 `json:"input_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	TotalTokens     int64 `json:"total_tokens"`
 }
 
 func GetAPILogStats() (APILogStats, error) {
@@ -51,6 +54,7 @@ func GetAPILogStats() (APILogStats, error) {
 		COUNT(*) AS calls,
 		COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0) AS success,
 		COALESCE(SUM(input_tokens), 0) AS input_tokens,
+		COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
 		COALESCE(SUM(output_tokens + COALESCE(thinking_tokens, 0)), 0) AS output_tokens
 	`).Scan(&stats).Error
 	stats.Failed = stats.Calls - stats.Success

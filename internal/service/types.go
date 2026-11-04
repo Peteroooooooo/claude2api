@@ -143,7 +143,10 @@ type CompletionResult struct {
 	Action         string
 	InputBytes     int
 	SwitchReason   string
-	UpstreamModel  string
+	// ContinuationMiss 说明为什么没能续聊（例如 reply_mismatch、history_diverged），
+	// 便于从日志判断重建原因。
+	ContinuationMiss string
+	UpstreamModel    string
 	ThinkingMode   string
 	Effort         string
 	Usage          *repository.UsageRecord

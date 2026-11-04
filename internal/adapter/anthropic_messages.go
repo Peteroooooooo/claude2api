@@ -202,7 +202,7 @@ func anthropicNonStream(c *gin.Context, model string, prompt service.Prompt) {
 		"content":       []gin.H{{"type": "text", "text": content}},
 		"stop_reason":   "end_turn",
 		"stop_sequence": nil,
-		"usage":         gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens},
+		"usage":         anthropicUsage(usage),
 	})
 }
 
@@ -242,7 +242,7 @@ func (s *messageStream) close() {
 func (s *messageStream) stop(reason string, usage repository.TextUsage) {
 	s.event("message_delta", gin.H{
 		"type": "message_delta", "delta": gin.H{"stop_reason": reason, "stop_sequence": nil},
-		"usage": gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens},
+		"usage": anthropicUsage(usage),
 	})
 	s.event("message_stop", gin.H{"type": "message_stop"})
 }
@@ -305,7 +305,7 @@ func anthropicToolNonStream(c *gin.Context, model string, prompt service.Prompt)
 		"content":       content,
 		"stop_reason":   stop,
 		"stop_sequence": nil,
-		"usage":         gin.H{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens + usage.ThinkingTokens},
+		"usage":         anthropicUsage(usage),
 	})
 }
 
@@ -346,4 +346,15 @@ func anthropicToolStream(c *gin.Context, model string, prompt service.Prompt) {
 		stopReason = "error"
 	}
 	stream.stop(stopReason, usage)
+}
+
+// anthropicUsage 按 Anthropic 语义返回用量：input_tokens 是本轮实际发送的内容，
+// cache_read_input_tokens 是续聊时上游重读、本轮未重新上传的历史。
+func anthropicUsage(usage repository.TextUsage) gin.H {
+	return gin.H{
+		"input_tokens":                usage.InputTokens,
+		"cache_read_input_tokens":     usage.CacheReadTokens,
+		"cache_creation_input_tokens": 0,
+		"output_tokens":               usage.OutputTokens + usage.ThinkingTokens,
+	}
 }

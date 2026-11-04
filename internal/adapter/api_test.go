@@ -88,19 +88,21 @@ func TestAPIUsageUsesCapturedCounts(t *testing.T) {
 	old := runner
 	runner = testRunner(func(_ string, _ service.Prompt, emit func(string)) (service.CompletionResult, error) {
 		emit("<think>visible reasoning</think>answer")
-		return service.CompletionResult{StatusCode: http.StatusOK, Usage: &repository.UsageRecord{Success: true, TextUsage: repository.TextUsage{InputTokens: 321, OutputTokens: 5, ThinkingTokens: 7}}}, nil
+		return service.CompletionResult{StatusCode: http.StatusOK, Usage: &repository.UsageRecord{Success: true, TextUsage: repository.TextUsage{InputTokens: 321, CacheReadTokens: 100, OutputTokens: 5, ThinkingTokens: 7}}}, nil
 	})
 	t.Cleanup(func() { runner = old })
+	// Anthropic 的 input_tokens 只含本轮实际发送；OpenAI 系列的输入总量含缓存读取。
 	for _, tc := range []struct {
 		name, body, inputKey, outputKey string
+		input                           float64
 		handler                         gin.HandlerFunc
 	}{
-		{"chat", `{"messages":[{"role":"user","content":"hi"}]}`, "prompt_tokens", "completion_tokens", OpenAIChat},
-		{"chat stream", `{"stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`, "prompt_tokens", "completion_tokens", OpenAIChat},
-		{"responses", `{"input":"hi"}`, "input_tokens", "output_tokens", OpenAIResponses},
-		{"responses stream", `{"stream":true,"input":"hi"}`, "input_tokens", "output_tokens", OpenAIResponses},
-		{"messages", `{"messages":[{"role":"user","content":"hi"}]}`, "input_tokens", "output_tokens", AnthropicMessages},
-		{"messages stream", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`, "input_tokens", "output_tokens", AnthropicMessages},
+		{"chat", `{"messages":[{"role":"user","content":"hi"}]}`, "prompt_tokens", "completion_tokens", 421, OpenAIChat},
+		{"chat stream", `{"stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`, "prompt_tokens", "completion_tokens", 421, OpenAIChat},
+		{"responses", `{"input":"hi"}`, "input_tokens", "output_tokens", 421, OpenAIResponses},
+		{"responses stream", `{"stream":true,"input":"hi"}`, "input_tokens", "output_tokens", 421, OpenAIResponses},
+		{"messages", `{"messages":[{"role":"user","content":"hi"}]}`, "input_tokens", "output_tokens", 321, AnthropicMessages},
+		{"messages stream", `{"stream":true,"messages":[{"role":"user","content":"hi"}]}`, "input_tokens", "output_tokens", 321, AnthropicMessages},
 	} {
 		for _, withTools := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/tools=%v", tc.name, withTools), func(t *testing.T) {
@@ -121,12 +123,12 @@ func TestAPIUsageUsesCapturedCounts(t *testing.T) {
 						}
 					}
 				}
-				var usage map[string]int
+				var usage map[string]any
 				for _, payload := range payloads {
 					var event struct {
-						Usage    map[string]int `json:"usage"`
+						Usage    map[string]any `json:"usage"`
 						Response struct {
-							Usage map[string]int `json:"usage"`
+							Usage map[string]any `json:"usage"`
 						} `json:"response"`
 					}
 					if err := json.Unmarshal([]byte(payload), &event); err != nil {
@@ -139,11 +141,20 @@ func TestAPIUsageUsesCapturedCounts(t *testing.T) {
 						usage = event.Response.Usage
 					}
 				}
-				if w.Code != http.StatusOK || usage[tc.inputKey] != 321 || usage[tc.outputKey] != 12 {
+				if w.Code != http.StatusOK || usage[tc.inputKey] != tc.input || usage[tc.outputKey] != float64(12) {
 					t.Fatalf("未复用采集用量：%d %s", w.Code, w.Body.String())
 				}
-				if total, ok := usage["total_tokens"]; ok && total != 333 {
+				if total, ok := usage["total_tokens"]; ok && total != tc.input+12 {
 					t.Fatalf("思考计数重复或遗漏：%v", usage)
+				}
+				cached := usage["cache_read_input_tokens"]
+				for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+					if details, ok := usage[key].(map[string]any); ok {
+						cached = details["cached_tokens"]
+					}
+				}
+				if cached != float64(100) {
+					t.Fatalf("续聊历史未作为缓存读取返回：%v", usage)
 				}
 			})
 		}

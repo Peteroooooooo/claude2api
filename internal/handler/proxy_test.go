@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"claude2api/internal/repository"
 )
 
 func TestSyncAccountOrgCookie(t *testing.T) {
@@ -59,6 +61,39 @@ func TestArtifactTicketDoesNotExposeCredential(t *testing.T) {
 	}
 	if cookies := mergeProxyCookies("claude2api_auth=admin-secret; browser=1", "sessionKey=2"); strings.Contains(cookies, "admin-secret") {
 		t.Fatalf("auth cookie leaked upstream: %s", cookies)
+	}
+}
+
+func TestProxyDirectorForwardsFrontendHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://10.10.10.30:8787/v1/toolbox/shttp/mcp/6f616b42-0ed8-571e-823f-ee4aca6b7ce9", nil)
+	forwarded := map[string]string{
+		"x-organization-uuid": "org-1", "x-mcp-client-session-id": "sid", "x-mcp-client-name": "ClaudeAI",
+		"mcp-protocol-version": "2025-06-18", "mcp-session-id": "mcp-sid", "last-event-id": "7",
+		"anthropic-version": "2023-06-01", "anthropic-beta": "ccr-byoc-2025-07-29", "X-Frame-CP": "go",
+		"Connect-Protocol-Version": "1", "x-activity-session-id": "act",
+	}
+	dropped := []string{"authorization", "x-forwarded-for", "x-real-ip"}
+	for k, v := range forwarded {
+		req.Header.Set(k, v)
+	}
+	for _, k := range dropped {
+		req.Header.Set(k, "browser")
+	}
+	pc := &proxyCtx{onMain: true, browserCookies: "claude2api_auth=admin-secret", record: &repository.Account{Cookies: map[string]string{"sessionKey": "sk"}}}
+	req = req.WithContext(context.WithValue(req.Context(), ctxKey{}, pc))
+	proxyDirector(req)
+	for k, want := range forwarded {
+		if got := req.Header.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	for _, k := range dropped {
+		if got := req.Header.Get(k); got != "" {
+			t.Errorf("%s leaked upstream: %q", k, got)
+		}
+	}
+	if req.Host != upstreamHost || strings.Contains(req.Header.Get("cookie"), "admin-secret") {
+		t.Fatalf("bad upstream request: host=%s cookie=%s", req.Host, req.Header.Get("cookie"))
 	}
 }
 

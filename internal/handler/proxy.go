@@ -40,9 +40,25 @@ const (
 // 转发到上游的请求头白名单。
 var forwardReqHeaders = map[string]bool{
 	"accept": true, "accept-language": true, "content-type": true, "user-agent": true,
-	"anthropic-client-platform": true, "anthropic-client-version": true,
-	"anthropic-client-sha": true, "anthropic-anonymous-id": true, "anthropic-device-id": true,
 	"x-requested-with": true, "sec-fetch-dest": true, "sec-fetch-mode": true, "sec-fetch-site": true,
+	// 缺这些头时上游会拒绝：连接器 401、/v1/code 400、/api/frame 404。
+	"x-organization-uuid": true, "x-activity-session-id": true, "last-event-id": true,
+}
+
+// 前端各功能自带的请求头，按前缀放行。
+var forwardReqHeaderPrefixes = []string{"anthropic-", "x-frame-", "mcp-", "x-mcp-", "connect-"}
+
+func forwardReqHeader(name string) bool {
+	lk := strings.ToLower(name)
+	if forwardReqHeaders[lk] {
+		return true
+	}
+	for _, prefix := range forwardReqHeaderPrefixes {
+		if strings.HasPrefix(lk, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // 上游响应头黑名单。
@@ -126,7 +142,7 @@ func proxyDirector(req *http.Request) {
 		req.Header.Set(k, v)
 	}
 	for k, vs := range orig {
-		if forwardReqHeaders[strings.ToLower(k)] {
+		if forwardReqHeader(k) {
 			for _, v := range vs {
 				req.Header.Set(k, v)
 			}
